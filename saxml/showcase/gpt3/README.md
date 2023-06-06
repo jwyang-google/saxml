@@ -3,7 +3,7 @@
 ### Checkout SAX repo and code
 ```
 git clone https://github.com/jwyang-google/saxml/tree/main
-git checkout llm_gpt3_gpt175b
+git checkout llm_gpt3_inference
 cd saxml
 ```
 
