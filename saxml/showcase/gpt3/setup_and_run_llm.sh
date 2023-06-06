@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Multi-Host v4
-NAME="jwyang-tpu-vm" # TODO: replace with some TPU name
+NAME="sax-tpu-vm" # TODO: replace with some TPU name
 PROJECT="tpu-prod-env-one-vm"
 ZONE="us-central2-b" # TODO: "us-central2-b"
 NUM_WORKERS=16
