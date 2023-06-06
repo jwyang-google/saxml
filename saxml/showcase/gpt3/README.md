@@ -1,6 +1,8 @@
 #  GPT-3 Inferece using SAX
 
-## This is a 175B GPT-3 model which require multi-worker TPU VM to run. To try with some small model to get familiar how to setup SAX on TPU, you can first look through https://github.com/jwyang-google/saxml/blob/llm_gpt3_inference/README.md
+
+### Try smaller model first (optional)
+This is a 175B GPT-3 model which require multi-worker TPU VM to run. To try with some small model to get familiar how to setup SAX on TPU, you can first look through https://github.com/jwyang-google/saxml/blob/llm_gpt3_inference/README.md
 
 ### Checkout SAX repo and code
 ```
