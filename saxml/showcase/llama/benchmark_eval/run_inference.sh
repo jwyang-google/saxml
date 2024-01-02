@@ -1,12 +1,10 @@
 #!/bin/bash
 
 # Multi-Host vlp (TODO: replace these params for your own config)
-NAME="jwyang-tpu-vm" 
-ACCELERATOR_TYPE="v5litepod-32"
+NAME="jwyang-tpu-vm-mlperf" 
+ACCELERATOR_TYPE="v5litepod-4"
 RUNTIME_VERSION="v2-alpha-tpuv5-lite"
-# PROJECT="tpu-prod-env-automated"
-# PROJECT="tpu-prod-env-small"
-PROJECT="tpu-prod-env-large-cont"
+PROJECT="tpu-prod-env-automated"
 ZONE="us-east1-c"
 
 USER=jwyang 
@@ -29,10 +27,6 @@ run_inference() {
     --project=${PROJECT} \
     --scp-flag "-o ProxyCommand=corp-ssh-helper %h %p"
 
-  gcloud compute tpus tpu-vm ssh ${NAME} --zone ${ZONE} --project ${PROJECT} --worker=1 \
-    --command="mkdir -p /home/${USER}/jax-trace/ && rm -rf /home/${USER}/jax-trace/" \
-    -- -o ProxyCommand='corp-ssh-helper %h %p'
-
   # compile SAX client and run inference
   RESULT_DIR=/home/${USER}/llama/${4}/batch${1}_input${2}_output${3}/
   gcloud compute tpus tpu-vm ssh ${NAME} --zone=${ZONE} --worker=0 --project=${PROJECT} \
@@ -48,21 +42,6 @@ run_inference() {
                   --input_seq_len ${2} \
                   --max_decode_steps ${3} |& tee ${RESULT_DIR}/benchmark.log" \
     -- -o ProxyCommand='corp-ssh-helper %h %p'
-
-  # gcloud compute tpus tpu-vm ssh ${NAME} --zone ${ZONE} --project ${PROJECT} --worker=0 \
-  #   --command="gsutil -m cp -r ${RESULT_DIR} gs://jwyang-data/llama-open-orca-eval-sax/${4}/" \
-  #   -- -o ProxyCommand='corp-ssh-helper %h %p'    
-  
-
-  # rm -rf ~/jax-trace/
-  # gcloud compute tpus tpu-vm \
-  #   scp --recurse --zone=${ZONE} \
-  #   --worker=7 ${NAME}:jax-trace/ \
-  #   ~/ \
-  #   --project=${PROJECT} \
-  #   --scp-flag "-o ProxyCommand=corp-ssh-helper %h %p"
-
-  # gsutil -m cp -r ~/jax-trace/ gs://jwyang-data/llama-open-orca-eval-sax/${4}/batch${1}_input${2}_output${3}/
 }
 
 
