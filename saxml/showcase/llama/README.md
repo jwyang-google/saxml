@@ -1,4 +1,4 @@
-#  GPT-3 Inferece using SAX
+#  MLPerf llama2 Inferece using SAX
 
 ### Checkout SAX repo and code
 ```
@@ -34,8 +34,7 @@ source saxml/showcase/gpt3/setup_and_run_llm.sh;
 ssh_to_tpu;
 ```
 
-From TPU VM prompt, copy the $TPU_NAME with format ```t1v-n-xxxxxxx``` and replace the $TPU_NAME in the ```llama_on_cloud_tpu.sh
-``` script.
+From TPU VM prompt, copy the $TPU_NAME with format ```t1v-n-xxxxxxx``` and replace the $TPU_NAME in the ```llama_on_cloud_tpu.sh``` script.
 Replace the $USER with your own gcloud username in the script.
 Exit TPU VM. 
 
@@ -80,10 +79,4 @@ Publish llama model to SAX model server:
 ```
 source saxml/showcase/llama/llama_on_cloud_tpu.sh;
 publish_model;
-```
-
-Run inference with cnn_dailymail test dataset:
-```
-source saxml/showcase/gpt3/setup_and_run_llm.sh;
-run_inference;
 ```
