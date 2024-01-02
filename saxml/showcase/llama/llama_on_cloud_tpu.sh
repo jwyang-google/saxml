@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Multi-Host vlp (TODO: replace these params for your own config)
-NAME="jwyang-tpu-vm-mlperf " 
+NAME="jwyang-tpu-vm-mlperf" 
 ACCELERATOR_TYPE="v5litepod-4"
 RUNTIME_VERSION="v2-alpha-tpuv5-lite"
 PROJECT="tpu-prod-env-automated"
@@ -171,7 +171,7 @@ start_model_servers() {
 
   gcloud compute tpus tpu-vm \
     scp --zone=${ZONE} --project=${PROJECT} --worker=all \
-    $PWD/showcase/llama/praxis/praxis_multi_query_attention.py \
+    $PWD/saxml/showcase/llama/praxis/praxis_multi_query_attention.py \
     ${NAME}:/mnt/disks/persist/bazel_build/60508e82bf5accbe3bafc1356d9f1998/external/third_party_praxis/site-packages/praxis/layers/multi_query_attention.py \
     --scp-flag "-o ProxyCommand=corp-ssh-helper %h %p"
 
@@ -222,23 +222,4 @@ unpublish_model() {
                 --sax_root=gs://${GSBUCKET}/sax-root unpublish \
                 /sax/test/llama" \
     -- -o ProxyCommand='corp-ssh-helper %h %p'
-}
-
-check_model_accuracy() {
-  ssh-add /usr/local/google/home/jwyang/.ssh/google_compute_engine
-  gcloud compute tpus tpu-vm ssh ${NAME} --zone=${ZONE} --worker=0 --project=${PROJECT} \
-    --command="git clone https://github.com/facebookresearch/llama.git" \
-    -- -o ProxyCommand='corp-ssh-helper %h %p'
-
-  gcloud compute tpus tpu-vm \
-    scp --zone=${ZONE} --project=${PROJECT} --worker=0 \
-    $PWD/inference/benchmarks/models/llama/praxis/praxis_multi_query_attention.py \
-    ${NAME}:~/.local/lib/python3.10/site-packages/praxis/layers/multi_query_attention.py \
-    --scp-flag "-o ProxyCommand=corp-ssh-helper %h %p"    
-
-  gcloud compute tpus tpu-vm \
-    scp --zone=${ZONE} --project=${PROJECT} --worker=0 \
-    $PWD/inference/benchmarks/models/llama/check_model_accuracy.py \
-    ${NAME}:~/llama/check_model_accuracy.py \
-    --scp-flag "-o ProxyCommand=corp-ssh-helper %h %p"
 }

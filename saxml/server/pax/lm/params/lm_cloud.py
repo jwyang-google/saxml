@@ -82,7 +82,7 @@ class BaseLLaMA(base_experiment.BaseExperiment):
   }
 
   def model(self):
-    model_p = pax_fiddle.Config(layers.LanguageModelContinuousBatching, name='xformer_lm')
+    model_p = pax_fiddle.Config(layers.LanguageModel, name='xformer_lm')
     model_p.lm_tpl.packed_input = False
     model_p.lm_tpl.model_dims = self.MODEL_DIMS
     model_p.lm_tpl.vocab_size = self.VOCAB_SIZE
