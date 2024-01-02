@@ -169,11 +169,11 @@ start_admin() {
 start_model_servers() {
   ssh-add /usr/local/google/home/jwyang/.ssh/google_compute_engine
 
-  # gcloud compute tpus tpu-vm \
-  #   scp --zone=${ZONE} --project=${PROJECT} --worker=all \
-  #   $PWD/showcase/llama/praxis/praxis_multi_query_attention.py \
-  #   ${NAME}:/mnt/disks/persist/bazel_build/60508e82bf5accbe3bafc1356d9f1998/external/third_party_praxis/site-packages/praxis/layers/multi_query_attention.py \
-  #   --scp-flag "-o ProxyCommand=corp-ssh-helper %h %p"
+  gcloud compute tpus tpu-vm \
+    scp --zone=${ZONE} --project=${PROJECT} --worker=all \
+    $PWD/showcase/llama/praxis/praxis_multi_query_attention.py \
+    ${NAME}:/mnt/disks/persist/bazel_build/60508e82bf5accbe3bafc1356d9f1998/external/third_party_praxis/site-packages/praxis/layers/multi_query_attention.py \
+    --scp-flag "-o ProxyCommand=corp-ssh-helper %h %p"
 
   # start saxml model server
   gcloud compute tpus tpu-vm ssh ${NAME} --zone=${ZONE} --worker=all --project=${PROJECT} \
@@ -197,22 +197,13 @@ restart_model_servers() {
   start_model_servers
 }
 
-# MODEL_CONFIG=saxml.server.pax.lm.params.lm_cloud.LLaMA70BFP16TPUv5e16
-# MODEL_CONFIG=saxml.server.pax.lm.params.lm_cloud.LLaMA70BFP16TPUv5e32
 # MODEL_CONFIG=saxml.server.pax.lm.params.lm_cloud.LLaMA70BFP16TPUv5e8
+# MODEL_CONFIG=saxml.server.pax.lm.params.lm_cloud.LLaMA70BFP16TPUv5e32
+# MODEL_CONFIG=saxml.server.pax.lm.params.lm_cloud.LLaMA70BFP16TPUv5e16
 # CHECKPOINT="gs://jwyang-archive/llama/pax_llama2_70b_chat/checkpoint_00000000"
 
 MODEL_CONFIG=saxml.server.pax.lm.params.lm_cloud.LLaMA7BFP16TPUv5e4
 CHECKPOINT="gs://jwyang-archive/llama/7b_pax_llama2/checkpoint_00000000"
-
-# MODEL_CONFIG=saxml.server.pax.lm.params.lm_cloud.LLaMA13BFP16TPUv5e8
-# CHECKPOINT="gs://jwyang-archive/llama/llama2_pax_weights/llama-2-13b-pax/checkpoint_00000000"
-
-# MODEL_CONFIG=saxml.server.pax.lm.params.lm_cloud.LLaMA13BFP16TPUv5e4
-# MODEL_CONFIG=saxml.server.pax.lm.params.lm_cloud.LLaMA33BFP16TPUv5e8
-# MODEL_CONFIG=saxml.server.pax.lm.params.lm_cloud.LLaMA65BFP16TPUv5e16
-
-# CNS repo: /cns/io-d/home/jwyang/data/llama_70b_pax_weights
 
 publish_model() {
   gcloud compute tpus tpu-vm ssh ${NAME} --zone=${ZONE} --worker=0 --project=${PROJECT} \
