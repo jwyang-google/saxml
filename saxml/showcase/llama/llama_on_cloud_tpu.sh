@@ -1,17 +1,10 @@
 #!/bin/bash
 
 # Multi-Host vlp (TODO: replace these params for your own config)
-<<<<<<< HEAD
 NAME="jwyang-tpu-vm-mlperf " 
-=======
-NAME="jwyang-tpu-vm-mlperf" 
->>>>>>> 752520f (llama on cloud tpu setup)
-# ACCELERATOR_TYPE="v5litepod-32"
 ACCELERATOR_TYPE="v5litepod-4"
 RUNTIME_VERSION="v2-alpha-tpuv5-lite"
 PROJECT="tpu-prod-env-automated"
-# PROJECT="tpu-prod-env-small"
-# PROJECT="tpu-prod-env-large-cont"
 ZONE="us-east1-c"
 
 # (TODO: replace these params to your own config)
@@ -20,7 +13,7 @@ TPU_NAME="t1v-n-1d662506"
 USER=jwyang 
 GSBUCKET=${NAME}-${USER}-sax-admin
 
-SAX_GIT_VERSION="sam-llama-mlperf"
+SAX_GIT_VERSION="sax-llama-mlperf"
 
 create_tpu() {
   # A temporary solution to clean up the failed and suspended queued resources.
@@ -137,7 +130,7 @@ check_disks() {
 
 build_sax() {
   gcloud compute tpus tpu-vm ssh --zone=${ZONE} ${NAME} --project=${PROJECT} --worker=all \
-    --command="if [ ! -d saxml ]; then git clone https://github.com/google/saxml.git; fi && \
+    --command="if [ ! -d saxml ]; then git clone https://github.com/jwyang-google/saxml.git; fi && \
               cd saxml && git fetch && git checkout -- . && git checkout ${SAX_GIT_VERSION} && \
               saxml/tools/init_cloud_vm.sh && sudo apt-get install -y python3-numpy" \
     -- -o ProxyCommand='corp-ssh-helper %h %p'
