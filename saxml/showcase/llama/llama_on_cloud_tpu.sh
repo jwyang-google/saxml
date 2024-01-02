@@ -1,7 +1,11 @@
 #!/bin/bash
 
 # Multi-Host vlp (TODO: replace these params for your own config)
+<<<<<<< HEAD
 NAME="jwyang-tpu-vm-mlperf " 
+=======
+NAME="jwyang-tpu-vm-mlperf" 
+>>>>>>> 752520f (llama on cloud tpu setup)
 # ACCELERATOR_TYPE="v5litepod-32"
 ACCELERATOR_TYPE="v5litepod-4"
 RUNTIME_VERSION="v2-alpha-tpuv5-lite"
@@ -138,12 +142,6 @@ build_sax() {
               saxml/tools/init_cloud_vm.sh && sudo apt-get install -y python3-numpy" \
     -- -o ProxyCommand='corp-ssh-helper %h %p'
 
-  gcloud compute tpus tpu-vm \
-    scp --zone=${ZONE} --project=${PROJECT} --worker=all \
-    $PWD/inference/benchmarks/models/llama/sax/requirements.txt \
-    ${NAME}:~/saxml/requirements.txt \
-    --scp-flag "-o ProxyCommand=corp-ssh-helper %h %p"
-
   gcloud compute tpus tpu-vm ssh ${NAME} --zone=${ZONE} --worker=all --project=${PROJECT} \
     --command="cd saxml && sudo chown -R ${USER}:${USER} /mnt/disks/persist/ && \
               nohup bazel --output_user_root=/mnt/disks/persist/bazel_build build saxml/server/server &" \
@@ -177,79 +175,12 @@ start_admin() {
 
 start_model_servers() {
   ssh-add /usr/local/google/home/jwyang/.ssh/google_compute_engine
-  
-  gcloud compute tpus tpu-vm \
-    scp --zone=${ZONE} --project=${PROJECT} --worker=all \
-    $PWD/inference/benchmarks/models/llama/sax/lm_cloud.py \
-    ${NAME}:~/saxml/saxml/server/pax/lm/params/lm_cloud.py \
-    --scp-flag "-o ProxyCommand=corp-ssh-helper %h %p"
 
-  gcloud compute tpus tpu-vm \
-    scp --zone=${ZONE} --project=${PROJECT} --worker=all \
-    $PWD/inference/benchmarks/models/llama/sax/model_service_base.py \
-    ${NAME}:~/saxml/saxml/server/model_service_base.py \
-    --scp-flag "-o ProxyCommand=corp-ssh-helper %h %p"
-
-  gcloud compute tpus tpu-vm \
-    scp --zone=${ZONE} --project=${PROJECT} --worker=all \
-    $PWD/inference/benchmarks/models/llama/sax/sax_layers.py \
-    ${NAME}:~/saxml/saxml/server/pax/lm/layers.py \
-    --scp-flag "-o ProxyCommand=corp-ssh-helper %h %p"
- 
-  gcloud compute tpus tpu-vm \
-    scp --zone=${ZONE} --project=${PROJECT} --worker=all \
-    $PWD/inference/benchmarks/models/llama/praxis/praxis_attentions.py \
-    ${NAME}:/mnt/disks/persist/bazel_build/60508e82bf5accbe3bafc1356d9f1998/external/third_party_praxis/site-packages/praxis/layers/attentions.py \
-    --scp-flag "-o ProxyCommand=corp-ssh-helper %h %p" 
-
-  gcloud compute tpus tpu-vm \
-    scp --zone=${ZONE} --project=${PROJECT} --worker=all \
-    $PWD/inference/benchmarks/models/llama/praxis/praxis_multi_query_attention.py \
-    ${NAME}:/mnt/disks/persist/bazel_build/60508e82bf5accbe3bafc1356d9f1998/external/third_party_praxis/site-packages/praxis/layers/multi_query_attention.py \
-    --scp-flag "-o ProxyCommand=corp-ssh-helper %h %p"
-
-  # sax continous batching files
-  gcloud compute tpus tpu-vm \
-    scp --zone=${ZONE} --project=${PROJECT} --worker=all \
-    $PWD/inference/benchmarks/models/llama/continous_batching/praxis_layers_init.py \
-    ${NAME}:/mnt/disks/persist/bazel_build/60508e82bf5accbe3bafc1356d9f1998/external/third_party_praxis/site-packages/praxis/layers/__init__.py \
-    --scp-flag "-o ProxyCommand=corp-ssh-helper %h %p"
-
-  gcloud compute tpus tpu-vm \
-    scp --zone=${ZONE} --project=${PROJECT} --worker=all \
-    $PWD/inference/benchmarks/models/llama/continous_batching/praxis_models.py \
-    ${NAME}:/mnt/disks/persist/bazel_build/60508e82bf5accbe3bafc1356d9f1998/external/third_party_praxis/site-packages/praxis/layers/models.py \
-    --scp-flag "-o ProxyCommand=corp-ssh-helper %h %p"
-
-  gcloud compute tpus tpu-vm \
-    scp --zone=${ZONE} --project=${PROJECT} --worker=all \
-    $PWD/inference/benchmarks/models/llama/continous_batching/praxis_sample_decode.py \
-    ${NAME}:/mnt/disks/persist/bazel_build/60508e82bf5accbe3bafc1356d9f1998/external/third_party_praxis/site-packages/praxis/sample_decode.py \
-    --scp-flag "-o ProxyCommand=corp-ssh-helper %h %p"
-
-  gcloud compute tpus tpu-vm \
-    scp --zone=${ZONE} --project=${PROJECT} --worker=all \
-    $PWD/inference/benchmarks/models/llama/continous_batching/sax_servable_lm_model.py \
-    ${NAME}:~/saxml/saxml/server/pax/lm/servable_lm_model.py \
-    --scp-flag "-o ProxyCommand=corp-ssh-helper %h %p"
-
-  gcloud compute tpus tpu-vm \
-    scp --zone=${ZONE} --project=${PROJECT} --worker=all \
-    $PWD/inference/benchmarks/models/llama/continous_batching/sax_pax_servable_model.py \
-    ${NAME}:~/saxml/saxml/server/pax/servable_model.py \
-    --scp-flag "-o ProxyCommand=corp-ssh-helper %h %p"
-
-  gcloud compute tpus tpu-vm \
-    scp --zone=${ZONE} --project=${PROJECT} --worker=all \
-    $PWD/inference/benchmarks/models/llama/continous_batching/sax_jax_servable_model.py \
-    ${NAME}:~/saxml/saxml/server/jax/servable_model.py \
-    --scp-flag "-o ProxyCommand=corp-ssh-helper %h %p"
-
-  gcloud compute tpus tpu-vm \
-    scp --zone=${ZONE} --project=${PROJECT} --worker=all \
-    $PWD/inference/benchmarks/models/llama/sax/requirements.txt \
-    ${NAME}:~/saxml/requirements.txt \
-    --scp-flag "-o ProxyCommand=corp-ssh-helper %h %p"
+  # gcloud compute tpus tpu-vm \
+  #   scp --zone=${ZONE} --project=${PROJECT} --worker=all \
+  #   $PWD/showcase/llama/praxis/praxis_multi_query_attention.py \
+  #   ${NAME}:/mnt/disks/persist/bazel_build/60508e82bf5accbe3bafc1356d9f1998/external/third_party_praxis/site-packages/praxis/layers/multi_query_attention.py \
+  #   --scp-flag "-o ProxyCommand=corp-ssh-helper %h %p"
 
   # start saxml model server
   gcloud compute tpus tpu-vm ssh ${NAME} --zone=${ZONE} --worker=all --project=${PROJECT} \
