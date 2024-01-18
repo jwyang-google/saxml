@@ -1,15 +1,19 @@
 #!/bin/bash
 
 # Multi-Host vlp (TODO: replace these params for your own config)
-NAME="jwyang-tpu-vm-mlperf" 
+NAME="jwyang-tpu-vm"
+# NAME="fanhai-tpu-vm"
+# ACCELERATOR_TYPE="v5litepod-16"
 ACCELERATOR_TYPE="v5litepod-4"
 RUNTIME_VERSION="v2-alpha-tpuv5-lite"
-PROJECT="tpu-prod-env-automated"
+# PROJECT="tpu-prod-env-automated"
+PROJECT="tpu-prod-env-small"
+# PROJECT="tpu-prod-env-large-cont"
 ZONE="us-east1-c"
 
 # (TODO: replace these params to your own config)
-NUM_WORKERS=1
-TPU_NAME="t1v-n-1d662506" 
+NUM_WORKERS=4
+TPU_NAME="t1v-n-b39c5382" 
 USER=jwyang 
 GSBUCKET=${NAME}-${USER}-sax-admin
 
@@ -132,7 +136,7 @@ build_sax() {
   gcloud compute tpus tpu-vm ssh --zone=${ZONE} ${NAME} --project=${PROJECT} --worker=all \
     --command="if [ ! -d saxml ]; then git clone https://github.com/jwyang-google/saxml.git; fi && \
               cd saxml && git fetch && git checkout -- . && git checkout ${SAX_GIT_VERSION} && \
-              saxml/tools/init_cloud_vm.sh && sudo apt-get install -y python3-numpy" \
+              saxml/tools/init_cloud_vm.sh && sudo apt-get install -y python3-numpy && sudo apt -y update && sudo apt install bazel=6.4.0" \
     -- -o ProxyCommand='corp-ssh-helper %h %p'
 
   gcloud compute tpus tpu-vm ssh ${NAME} --zone=${ZONE} --worker=all --project=${PROJECT} \
@@ -171,9 +175,89 @@ start_model_servers() {
 
   gcloud compute tpus tpu-vm \
     scp --zone=${ZONE} --project=${PROJECT} --worker=all \
+    $PWD/saxml/server/pax/lm/layers.py \
+    ${NAME}:~/saxml/saxml/server/pax/lm/layers.py \
+    --scp-flag "-o ProxyCommand=corp-ssh-helper %h %p"
+ 
+  # gcloud compute tpus tpu-vm \
+  #   scp --zone=${ZONE} --project=${PROJECT} --worker=all \
+  #   $PWD/saxml/showcase/llama/praxis/praxis_attentions.py \
+  #   ${NAME}:/mnt/disks/persist/bazel_build/60508e82bf5accbe3bafc1356d9f1998/external/third_party_praxis/site-packages/praxis/layers/attentions.py \
+  #   --scp-flag "-o ProxyCommand=corp-ssh-helper %h %p" 
+
+  gcloud compute tpus tpu-vm \
+    scp --zone=${ZONE} --project=${PROJECT} --worker=all \
     $PWD/saxml/showcase/llama/praxis/praxis_multi_query_attention.py \
     ${NAME}:/mnt/disks/persist/bazel_build/60508e82bf5accbe3bafc1356d9f1998/external/third_party_praxis/site-packages/praxis/layers/multi_query_attention.py \
     --scp-flag "-o ProxyCommand=corp-ssh-helper %h %p"
+
+  # continous batching files
+  gcloud compute tpus tpu-vm \
+    scp --zone=${ZONE} --project=${PROJECT} --worker=all \
+    $PWD/saxml/showcase/llama/praxis/praxis_layers_init.py \
+    ${NAME}:/mnt/disks/persist/bazel_build/60508e82bf5accbe3bafc1356d9f1998/external/third_party_praxis/site-packages/praxis/layers/__init__.py \
+    --scp-flag "-o ProxyCommand=corp-ssh-helper %h %p"
+
+  gcloud compute tpus tpu-vm \
+    scp --zone=${ZONE} --project=${PROJECT} --worker=all \
+    $PWD/saxml/showcase/llama/praxis/praxis_models.py \
+    ${NAME}:/mnt/disks/persist/bazel_build/60508e82bf5accbe3bafc1356d9f1998/external/third_party_praxis/site-packages/praxis/layers/models.py \
+    --scp-flag "-o ProxyCommand=corp-ssh-helper %h %p"
+
+  gcloud compute tpus tpu-vm \
+    scp --zone=${ZONE} --project=${PROJECT} --worker=all \
+    $PWD/saxml/showcase/llama/praxis/praxis_sample_decode.py \
+    ${NAME}:/mnt/disks/persist/bazel_build/60508e82bf5accbe3bafc1356d9f1998/external/third_party_praxis/site-packages/praxis/sample_decode.py \
+    --scp-flag "-o ProxyCommand=corp-ssh-helper %h %p"
+
+  gcloud compute tpus tpu-vm \
+    scp --zone=${ZONE} --project=${PROJECT} --worker=all \
+    $PWD/saxml/showcase/llama/praxis/praxis_decoder_hparams.py \
+    ${NAME}:/mnt/disks/persist/bazel_build/60508e82bf5accbe3bafc1356d9f1998/external/third_party_praxis/site-packages/praxis/decoder_hparams.py \
+    --scp-flag "-o ProxyCommand=corp-ssh-helper %h %p"
+
+  gcloud compute tpus tpu-vm \
+    scp --zone=${ZONE} --project=${PROJECT} --worker=all \
+    $PWD/saxml/server/pax/lm/params/lm_cloud.py \
+    ${NAME}:~/saxml/saxml/server/pax/lm/params/lm_cloud.py \
+    --scp-flag "-o ProxyCommand=corp-ssh-helper %h %p"
+
+  gcloud compute tpus tpu-vm \
+    scp --zone=${ZONE} --project=${PROJECT} --worker=all \
+    $PWD/saxml/server/model_service_base.py \
+    ${NAME}:~/saxml/saxml/server/model_service_base.py \
+    --scp-flag "-o ProxyCommand=corp-ssh-helper %h %p"
+
+  gcloud compute tpus tpu-vm \
+    scp --zone=${ZONE} --project=${PROJECT} --worker=all \
+    $PWD/saxml/server/pax/lm/servable_lm_model.py \
+    ${NAME}:~/saxml/saxml/server/pax/lm/servable_lm_model.py \
+    --scp-flag "-o ProxyCommand=corp-ssh-helper %h %p"
+
+  gcloud compute tpus tpu-vm \
+    scp --zone=${ZONE} --project=${PROJECT} --worker=all \
+    $PWD/saxml/server/pax/servable_model.py \
+    ${NAME}:~/saxml/saxml/server/pax/servable_model.py \
+    --scp-flag "-o ProxyCommand=corp-ssh-helper %h %p"
+
+  gcloud compute tpus tpu-vm \
+    scp --zone=${ZONE} --project=${PROJECT} --worker=all \
+    $PWD/saxml/server/jax/servable_model.py \
+    ${NAME}:~/saxml/saxml/server/jax/servable_model.py \
+    --scp-flag "-o ProxyCommand=corp-ssh-helper %h %p"
+
+  gcloud compute tpus tpu-vm \
+    scp --zone=${ZONE} --project=${PROJECT} --worker=all \
+    $PWD/saxml/server/pax/lm/params/template.py \
+    ${NAME}:~/saxml/saxml/server/pax/lm/params/template.py \
+    --scp-flag "-o ProxyCommand=corp-ssh-helper %h %p"
+
+  gcloud compute tpus tpu-vm \
+    scp --zone=${ZONE} --project=${PROJECT} --worker=all \
+    $PWD/saxml/server/servable_model.py \
+    ${NAME}:~/saxml/saxml/server/servable_model.py \
+    --scp-flag "-o ProxyCommand=corp-ssh-helper %h %p"
+
 
   # start saxml model server
   gcloud compute tpus tpu-vm ssh ${NAME} --zone=${ZONE} --worker=all --project=${PROJECT} \
@@ -197,13 +281,26 @@ restart_model_servers() {
   start_model_servers
 }
 
-# MODEL_CONFIG=saxml.server.pax.lm.params.lm_cloud.LLaMA70BFP16TPUv5e8
+
 # MODEL_CONFIG=saxml.server.pax.lm.params.lm_cloud.LLaMA70BFP16TPUv5e32
+# MODEL_CONFIG=saxml.server.pax.lm.params.lm_cloud.LLaMA70BFP16TPUv5e8
+
 # MODEL_CONFIG=saxml.server.pax.lm.params.lm_cloud.LLaMA70BFP16TPUv5e16
 # CHECKPOINT="gs://jwyang-archive/llama/pax_llama2_70b_chat/checkpoint_00000000"
 
-MODEL_CONFIG=saxml.server.pax.lm.params.lm_cloud.LLaMA7BFP16TPUv5e4
-CHECKPOINT="gs://jwyang-archive/llama/7b_pax_llama2/checkpoint_00000000"
+# MODEL_CONFIG=saxml.server.pax.lm.params.lm_cloud.LLaMA7BFP16TPUv5e4
+MODEL_CONFIG=saxml.server.pax.lm.params.lm_cloud.LLaMA7BFP16TPUv5e4_ContinuousBatching
+# MODEL_CONFIG=saxml.server.pax.lm.params.lm_cloud.LLaMA7BFP16TPUv5e16
+CHECKPOINT="gs://jwyang-archive/llama/llama2-7b-chat-pax/checkpoint_00000000"
+
+# MODEL_CONFIG=saxml.server.pax.lm.params.lm_cloud.LLaMA13BFP16TPUv5e8
+# CHECKPOINT="gs://jwyang-archive/llama/llama2_pax_weights/llama-2-13b-pax/checkpoint_00000000"
+
+# MODEL_CONFIG=saxml.server.pax.lm.params.lm_cloud.LLaMA13BFP16TPUv5e4
+# MODEL_CONFIG=saxml.server.pax.lm.params.lm_cloud.LLaMA33BFP16TPUv5e8
+# MODEL_CONFIG=saxml.server.pax.lm.params.lm_cloud.LLaMA65BFP16TPUv5e16
+
+# CNS repo: /cns/io-d/home/jwyang/data/llama_70b_pax_weights
 
 publish_model() {
   gcloud compute tpus tpu-vm ssh ${NAME} --zone=${ZONE} --worker=0 --project=${PROJECT} \
@@ -222,4 +319,23 @@ unpublish_model() {
                 --sax_root=gs://${GSBUCKET}/sax-root unpublish \
                 /sax/test/llama" \
     -- -o ProxyCommand='corp-ssh-helper %h %p'
+}
+
+check_model_accuracy() {
+  ssh-add /usr/local/google/home/jwyang/.ssh/google_compute_engine
+  gcloud compute tpus tpu-vm ssh ${NAME} --zone=${ZONE} --worker=0 --project=${PROJECT} \
+    --command="git clone https://github.com/facebookresearch/llama.git" \
+    -- -o ProxyCommand='corp-ssh-helper %h %p'
+
+  gcloud compute tpus tpu-vm \
+    scp --zone=${ZONE} --project=${PROJECT} --worker=0 \
+    $PWD/inference/benchmarks/models/llama/praxis/praxis_multi_query_attention.py \
+    ${NAME}:~/.local/lib/python3.10/site-packages/praxis/layers/multi_query_attention.py \
+    --scp-flag "-o ProxyCommand=corp-ssh-helper %h %p"    
+
+  gcloud compute tpus tpu-vm \
+    scp --zone=${ZONE} --project=${PROJECT} --worker=0 \
+    $PWD/inference/benchmarks/models/llama/check_model_accuracy.py \
+    ${NAME}:~/llama/check_model_accuracy.py \
+    --scp-flag "-o ProxyCommand=corp-ssh-helper %h %p"
 }

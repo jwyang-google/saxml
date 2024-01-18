@@ -221,10 +221,11 @@ class ServableMethod(abc.ABC):
       if bs >= unpadded_shape.batch_size:
         return InputShapeInfo(bs)
 
-    raise ValueError(
-        f'Batch size larger than maximum: {unpadded_shape.batch_size} vs '
-        f'{self.batch_size}'
-    )
+    # raise ValueError(
+    #     f'Batch size larger than maximum: {unpadded_shape.batch_size} vs '
+    #     f'{self.batch_size}'
+    # )
+    return InputShapeInfo(unpadded_shape.batch_size)
 
   def get_unpadded_shape(
       self, unpadded_batch_size, inputs: HostTensors

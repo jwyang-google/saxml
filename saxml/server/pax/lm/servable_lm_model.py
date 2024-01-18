@@ -32,12 +32,14 @@ from praxis import pax_fiddle
 from praxis import py_utils
 from praxis import pytypes
 from saxml.server.jax import np_tf_sess_wrapper
+from saxml.server.jax import servable_model as jax_servable_model
 from saxml.server.pax import servable_model
 from saxml.server.pax import servable_model_params
 from saxml.server.pax.lm import lm_tokenizer
 from saxml.server.pax.lm import servable_lm_common
 from saxml.server.services import lm_service
 import tensorflow as tf
+
 
 JTensor = pytypes.JTensor
 NestedJTensor = pytypes.NestedJTensor
@@ -667,18 +669,18 @@ class LMDecodeMethod(ServableLMMethod):
     k1, k2 = prng_key
 
     kwargs = {}
-    if self.streamable:
+    # if self.streamable_output:
 
-      def callback_fn(x, _):
-        assert self.model_state.is_primary_host
-        self.enqueue_stream_output(x)
+    #   def callback_fn(x, _):
+    #     assert self.model_state.is_primary_host
+    #     self.enqueue_stream_output(x)
 
-      kwargs['result_callback'] = decoder_utils.StreamingResultCallback(
-          functools.partial(
-              hcb.id_tap, callback_fn, device_index=self.callback_device_index
-          ),
-          interval_steps=self._method_hparams.stream_interval_steps,
-      )
+    #   kwargs['result_callback'] = decoder_utils.StreamingResultCallback(
+    #       functools.partial(
+    #           hcb.id_tap, callback_fn, device_index=self.callback_device_index
+    #       ),
+    #       interval_steps=self._method_hparams.stream_interval_steps,
+    #   )
 
     if (
         'callback_device_index'
@@ -903,6 +905,1630 @@ class LMDecodeMethod(ServableLMMethod):
   def tf_trackable_resources(self) -> Any:
     """Implements `ExportableToSavedModel.tf_trackable_resources`."""
     return None
+
+
+## LMDecoderMethod for continous batching
+from typing import Any, Callable, Dict, List, Optional, Sequence, Union
+from jax.experimental import pjit
+# string values can be used in host callbacks and are converted to integers
+# when passing around through a global repository on host.
+ExtraInput = Dict[str, Union[float, str, List[float]]]
+# TODO(sax-dev): define these types or use pax's definitions.
+HostTensors = Any
+DeviceTensors = Any
+PSpecs = Any
+ShapesAndDtypes = Any
+Shapes = Any
+JaxTensors = Any
+
+from saxml.server import servable_model as sax_servable_model
+SaxServableModelInputShapeInfo = sax_servable_model.InputShapeInfo
+
+def remove_padding(x: jnp.ndarray, shape: Sequence[int]) -> jnp.ndarray:
+  if list(x.shape) == shape:
+    return x
+  return jax.lax.slice(x, [0] * x.ndim, shape)
+
+ServableModelState = jax_servable_model.ServableModelState
+MethodInputInfo = jax_servable_model.MethodInputInfo
+
+class LMDecodeMethodContinuousBatching(LMDecodeMethod):
+  
+  # initialize model state
+  def init_model_state(self):
+    logging.info("Calling init model state")
+    input_shape_keys = list(self._per_bs_infos.keys())
+    logging.info(input_shape_keys)
+    
+    assert self._method_hparams.decoder.enable_continuous_batching
+    continuous_batching_batch_size = self._method_hparams.decoder.continuous_batching_batch_size
+    input_shape = InputShapeInfo(continuous_batching_batch_size, input_shape_keys[0].seq_len)
+    logging.info("LMDecode method continuous batching size: {}".format(continuous_batching_batch_size))
+    
+    batch_tensors = self._per_bs_infos[input_shape].dummy_inputs
+    logging.info("dummy input batch: {}".format(batch_tensors))
+    decode_data = self.device_compute_prefill(
+      input_batch=batch_tensors,
+      unpadded_shape=input_shape,
+    )
+
+    decode_state, decode_cache = self.device_compute_init_decode_state(
+      input_batch=batch_tensors,
+      unpadded_shape=input_shape,
+      decode_data=decode_data
+    )
+    return decode_state, decode_cache
+
+  def device_compute_prefill(
+      self, input_batch: DeviceTensors, unpadded_shape: SaxServableModelInputShapeInfo
+  ):
+    padded_shape = self.get_padded_input_shape(unpadded_shape)
+    with self.model_state.global_mesh:
+      logging.info("Calling greedy prefill")
+      decode_data, decode_cache = self._per_bs_infos[padded_shape].device_fn[0](
+        self.model_state.mdl_vars, input_batch
+      )
+      self.model_state.mdl_vars.update(decode_cache)
+      return decode_data
+  
+  def device_compute_init_decode_state(
+      self, input_batch: DeviceTensors, unpadded_shape: SaxServableModelInputShapeInfo, decode_data
+  ):
+    padded_shape = self.get_padded_input_shape(unpadded_shape)
+    with self.model_state.global_mesh:
+      logging.info("Calling greedy init decode state with padded shape: {}".format(padded_shape))
+      init_decode_state, decode_cache = self._per_bs_infos[padded_shape].device_fn[1](
+        self.model_state.mdl_vars, input_batch, decode_data
+      )
+      # logging.info("before greedy init decode state update updated_vars ")
+      # self.model_state.mdl_vars.update(updated_vars)
+      # logging.info("after greedy init decode state update updated_vars")
+    return init_decode_state, decode_cache
+
+  def device_compute_prefill_and_insert(
+      self, 
+      input_batch: DeviceTensors, 
+      unpadded_shape: SaxServableModelInputShapeInfo,
+      decode_state,
+      decode_cache,
+      slot_idx):
+    # Update kv cache in decode_state
+    # decode_state['lm'].update(self.model_state.mdl_vars['decoder_cache']['lm'])
+    logging.info("model kv cache vars after init_model_state: {}".format(
+      self.model_state.mdl_vars['decoder_cache']['lm']['transformer']['x_layers_0']['self_attention']['key_state'].shape)
+    )
+    self.model_state.mdl_vars.update(decode_cache)
+
+    padded_shape = self.get_padded_input_shape(unpadded_shape)
+    with self.model_state.global_mesh:
+      logging.info("Calling greedy prefill and insert")
+      decode_state, decode_cache = self._per_bs_infos[padded_shape].device_fn[4](
+        self.model_state.mdl_vars, 
+        input_batch, 
+        decode_state,
+        # decode_cache,
+        slot_idx
+      )
+
+      # Update the model kv cache with inserted request kv cache
+      # self.model_state.mdl_vars['decoder_cache']['lm'].update(decode_state['lm'])
+      return decode_state, decode_cache
+
+  def device_compute_decoding_step(
+      self, 
+      unpadded_shape: SaxServableModelInputShapeInfo, 
+      decode_state,
+      decode_cache
+  ):
+    self.model_state.mdl_vars.update(decode_cache)
+    padded_shape = self.get_padded_input_shape(unpadded_shape)
+    with self.model_state.global_mesh:
+      logging.info("Calling greedy decoding step")
+      decode_state, decode_cache = self._per_bs_infos[padded_shape].device_fn[2](
+        self.model_state.mdl_vars, 
+        decode_state
+      )
+      # self.model_state.mdl_vars.update(updated_vars)
+      # logging.info("Decode cache step: {}".format(self.model_state.mdl_vars['decoder_cache']['lm']['time_step']))
+    return decode_state, decode_cache
+
+  def device_compute_decoding_loop(
+      self, input_batch: DeviceTensors, unpadded_shape: SaxServableModelInputShapeInfo, decode_state
+  ):
+    padded_shape = self.get_padded_input_shape(unpadded_shape)
+    with self.model_state.global_mesh:
+      logging.info("Calling greedy decoding loop")
+      for i in range(64):
+        decode_state, updated_vars = self._per_bs_infos[padded_shape].device_fn[2](
+          self.model_state.mdl_vars, input_batch, decode_state
+        )
+        logging.info("updated_vars in {} iteration: {}".format(
+          i, 
+          updated_vars['decoder_cache']['lm']['transformer']['x_layers_0']['self_attention']['key_state'].shape))
+        self.model_state.mdl_vars.update(updated_vars)
+    return decode_state
+  
+  def device_compute_process_result(
+      self, 
+      # input_batch: DeviceTensors, 
+      unpadded_shape: SaxServableModelInputShapeInfo, 
+      decode_state
+  ):
+    padded_shape = self.get_padded_input_shape(unpadded_shape)
+    with self.model_state.global_mesh:
+      logging.info("Calling greedy process result")
+      output_batch = self._per_bs_infos[padded_shape].device_fn[3](
+        self.model_state.mdl_vars, 
+        # input_batch, 
+        decode_state
+      )
+      return output_batch
+
+  def device_compute_process_result_with_idx(
+      self, 
+      unpadded_shape: SaxServableModelInputShapeInfo, 
+      decode_state,
+      slot_idx
+  ):
+    padded_shape = self.get_padded_input_shape(unpadded_shape)
+    with self.model_state.global_mesh:
+      logging.info("Calling greedy process result with idx".format(slot_idx))
+      output_batch = self._per_bs_infos[padded_shape].device_fn[5](
+        self.model_state.mdl_vars, 
+        decode_state,
+        slot_idx
+      )
+      return output_batch
+
+  def device_compute(
+      self, input_batch: DeviceTensors, unpadded_shape: SaxServableModelInputShapeInfo
+  ) -> DeviceTensors:
+    """Executes the device computation."""
+    padded_shape = self.get_padded_input_shape(unpadded_shape)
+    with self.model_state.global_mesh:
+      logging.info("Call continuous batching decode device fn")
+      # output_batch = self._per_bs_infos[padded_shape].device_fn[0](
+      #     self.model_state.mdl_vars, input_batch
+      # )
+      decode_data, updated_vars = self._per_bs_infos[padded_shape].device_fn[0](
+        self.model_state.mdl_vars, input_batch
+      )
+      # self.model_state.mdl_vars.update(updated_vars)
+      logging.info("after calling greedy prefill")
+
+      init_decode_state, updated_vars = self._per_bs_infos[padded_shape].device_fn[1](
+        self.model_state.mdl_vars, input_batch, decode_data
+      )
+      self.model_state.mdl_vars.update(updated_vars)
+      logging.info("after calling greedy init decode state")
+
+      decode_state = init_decode_state
+      for i in range(64):
+        decode_state, updated_vars = self._per_bs_infos[padded_shape].device_fn[2](
+          self.model_state.mdl_vars, 
+          # input_batch, 
+          decode_state
+        )
+        logging.info("updated_vars in {} iteration: {}".format(
+          i, 
+          updated_vars['decoder_cache']['lm']['transformer']['x_layers_0']['self_attention']['key_state'].shape))
+        self.model_state.mdl_vars.update(updated_vars)
+      logging.info("after calling greedy decoding loop")
+
+      output_batch = self._per_bs_infos[padded_shape].device_fn[3](
+        self.model_state.mdl_vars, 
+        # input_batch, 
+        decode_state
+      )
+      logging.info("after calling greedy process result, output_batch: {}".format(output_batch))
+      return output_batch
+
+
+
+  def init_decode_cache_and_shardings(self, num_layers):
+    def _get_decode_pspec(x):
+      # return jax.sharding.PartitionSpec(*(None,) * (len(x.shape)))
+      return jax.sharding.PartitionSpec(None, None, ('mdl',), None)
+
+    def _get_prefill_pspec(x):
+      return jax.sharding.PartitionSpec(None, None, ('mdl',), None)
+    
+    # decode cache vars
+    kv_cache = {}
+    for i in range(num_layers):
+      layer_kv_cache = {'x_layers_{}'.format(i): {'self_attention': {
+        'key_state': jnp.zeros((1, 2048, 32, 128), dtype=jnp.bfloat16), 
+        'value_state': jnp.zeros((1, 2048, 32, 128), dtype=jnp.bfloat16), 
+        'key_post_rotary_pos_emb': jnp.zeros((1, 2048, 32, 128), dtype=jnp.bfloat16)}}}
+      kv_cache.update(layer_kv_cache)
+    decode_cache = {'decoder_cache': {'lm': {'time_step': 0, 'transformer': kv_cache}}}
+    self.model_state.mdl_vars.update(decode_cache)
+
+    # decode cache sharding
+    time_step_partition_spec = jax.sharding.PartitionSpec()
+    transformer_decode_parition_spec = jax.tree_util.tree_map(
+      _get_decode_pspec, decode_cache[base_layer.DECODE_CACHE]['lm']['transformer'])
+    transformer_prefill_partition_spec = jax.tree_util.tree_map(
+      _get_prefill_pspec, decode_cache[base_layer.DECODE_CACHE]['lm']['transformer'])
+    
+    decode_cache_pspecs = {'decoder_cache': {'lm': {'time_step': time_step_partition_spec, 
+                                                    'transformer': transformer_decode_parition_spec}}}
+    prefill_cache_pspecs = {'decoder_cache': {'lm': {'time_step': time_step_partition_spec, 
+                                                    'transformer': transformer_prefill_partition_spec}}}
+    self.decode_cache_pspecs = decode_cache_pspecs
+    self.prefill_cache_pspecs = prefill_cache_pspecs
+
+    # self.model_state.mdl_var_pspecs.update(decode_cache_pspecs)
+
+  # manually initialize decode state shardings
+  def init_decode_state_shardings(self):
+    pass
+
+  def _register_for_input_shape(self, input_shape: SaxServableModelInputShapeInfo) -> None:
+    # init shardings for decode_cache, decode_state
+    self.init_decode_cache_and_shardings(32)
+    self.init_decode_state_shardings()
+
+    self._register_for_input_shape_sub(input_shape)
+    
+    assert self._method_hparams.decoder.enable_continuous_batching
+    continuous_batching_batch_size = self._method_hparams.decoder.continuous_batching_batch_size
+    logging.info("LMDecode method continuous batching size: {}".format(continuous_batching_batch_size))
+
+    continuous_batching_input_shape = InputShapeInfo(
+      continuous_batching_batch_size, input_shape.seq_len)
+    if continuous_batching_input_shape != input_shape:
+      self._register_for_input_shape_sub(continuous_batching_input_shape)
+
+  def _register_for_input_shape_sub(self, input_shape: SaxServableModelInputShapeInfo) -> None:
+    logging.info("Register continuous batching decoding method, input_shape: {}".format(
+      input_shape))
+
+    batched_host_dummy = self.get_dummy_inputs(input_shape)
+    batched_host_dummy = self.update_extra_inputs(
+        batched_host_dummy,
+        input_shape.batch_size,
+        [self.default_extra_inputs] * input_shape.batch_size,
+    )
+
+    def _assert_type(x):
+      assert isinstance(x, np.ndarray) or isinstance(
+          x, jnp.ndarray
+      ), f'Output of pre_processing contained an invalid type: {type(x)}'
+      return x
+
+    dummy_step = np.array(0, dtype=np.int32)
+    host_dummy = (
+        dummy_step,
+        batched_host_dummy,
+        self.get_nonbatch_inputs(batched_host_dummy),
+    )
+    host_dummy = jax.tree_util.tree_map(_assert_type, host_dummy)
+
+    def _get_pspec(x):
+      # Add a `cores` dimension.
+      return jax.sharding.PartitionSpec(
+          self.model_state.global_mesh.axis_names, *(None,) * (len(x.shape))
+      )
+
+    input_pspecs = jax.tree_util.tree_map(_get_pspec, host_dummy)
+    num_cores = len(self.model_state.global_mesh.devices.flat)
+
+    global_inputs_shape_dtype = jax.tree_util.tree_map(
+        lambda x: ((num_cores,) + x.shape, x.dtype), host_dummy
+    )
+    global_inputs_shaped_arrays = jax.tree_util.tree_map(
+        lambda x: jax.core.ShapedArray((num_cores,) + x.shape, x.dtype),
+        host_dummy,
+    )
+    logging.info("global_inputs_shape_dtype: {}".format(global_inputs_shape_dtype[1]))
+    logging.info("input_shape: {}, batched_host_dummy: {}".format(input_shape, batched_host_dummy))
+
+    self._per_bs_infos[input_shape] = MethodInputInfo(
+        input_pspecs=input_pspecs,
+        global_inputs_shape_dtype=global_inputs_shape_dtype,
+    )
+    info = self._per_bs_infos[input_shape]
+    info.host_dummy_inputs = batched_host_dummy
+
+    info.dummy_inputs_per_device_buffers = self._input_to_device_buffers(
+        batched_host_dummy, input_shape, is_dummy=True
+    )
+    logging.info("Finished calling input_to_device_buffers: {}".format(input_shape))
+    info.dummy_inputs = self._device_buffers_to_jax_arrays(
+        info.dummy_inputs_per_device_buffers, input_shape
+    )
+
+    # self.init_decode_cache_and_shardings()
+    logging.info("Partition specs mdl_vars: {}".format(self._model_state.mdl_var_pspecs))
+    logging.info("Partition specs input: {}".format(input_pspecs))
+
+    # Initialize the device function.
+    greedy_prefill_device_fn = self._pjit_device_fn_greedy_prefill(
+      self.greedy_prefill_jax_func, input_pspecs, input_shape.batch_size)
+
+    greedy_init_decode_state_device_fn = self._pjit_device_fn_greedy_init_decode_state(
+      self.greedy_init_decode_state_jax_func, input_pspecs, input_shape.batch_size
+    )
+
+    greedy_decode_step_device_fn = self._pjit_device_fn_greedy_decode_step(
+      self.greedy_decode_step_jax_func, input_pspecs, input_shape.batch_size
+    )
+
+    # greedy_decode_device_fn = self._pjit_device_fn_greedy_decode(
+    #   self.greedy_decode_jax_func, input_pspecs, input_shape.batch_size
+    # )
+
+    greedy_process_result_device_fn = self._pjit_device_fn_greedy_process_result(
+      self.greedy_process_result_jax_func, input_pspecs, input_shape.batch_size
+    )
+
+    greedy_prefill_and_insert_device_fn = self._pjit_device_fn_prefill_and_insert(
+      self.greedy_prefill_and_insert_jax_func, input_pspecs, input_shape.batch_size
+    )
+
+    greedy_process_result_with_idx_device_fn = self._pjit_device_fn_greedy_process_result_with_idx(
+      self.greedy_process_result_with_idx_jax_func, input_pspecs, input_shape.batch_size
+    )
+
+    # device_fn = self._pjit_device_fn(input_pspecs, input_shape.batch_size)
+
+    if self._enable_auto_sharding or self._compiler_options:
+      device_fn = self.jax_aot_compile(
+          step_fn=device_fn,
+          train_state=self.model_state,
+          inputs_shape_dtype=global_inputs_shaped_arrays,
+          compiler_options=self._compiler_options,
+      )
+
+      if self._enable_auto_sharding:
+        input_shardings = device_fn.input_shardings[0]
+        self._prng_key, _ = jax.random.split(self._prng_key)
+        input_pspecs = jax.tree_util.tree_map(
+            lambda x: x.spec, input_shardings[1]
+        )
+        mdl_var_pspecs = input_shardings[0]
+
+        # Reshard model vars based on shardings inferred by the
+        # auto-sharding pass. In PAX, we create model vars and
+        # initialize them based on the shardings inferred. In SAX, we
+        # need to re-shard them as they are created before we run
+        # auto-sharding (say when the model is loaded from a
+        # checkpoint).
+        resharded_mdl_vars = jax.device_put(
+            self.model_state.mdl_vars, mdl_var_pspecs
+        )
+        # Update the model state (self._model_state) with the resharded
+        # model vars and their shardings. Note that self.model_state is
+        # a getter for the underlying self._model_state field (see
+        # below).
+        self._model_state = ServableModelState(
+            resharded_mdl_vars,
+            self.model_state.mdl_var_unpadded_shapes,
+            self.model_state.is_primary_host,
+            self.model_state.primary_process_id,
+            self.model_state.input_prefetch,
+            self.model_state.precompile,
+            self.model_state.step,
+            self.model_state.global_mesh,
+            mdl_var_pspecs,
+        )
+
+    info.device_fn = [greedy_prefill_device_fn, greedy_init_decode_state_device_fn, 
+                      greedy_decode_step_device_fn, greedy_process_result_device_fn,
+                      greedy_prefill_and_insert_device_fn,
+                      greedy_process_result_with_idx_device_fn]
+    # info.device_fn = [device_fn]
+
+    # # Compute with dummy to trigger compilation.
+    # if self.model_state.precompile:
+    #   init_dummy_outputs = self.device_compute(info.dummy_inputs, input_shape)
+
+    # if self.model_state.is_primary_host:
+    #   # Transfer dummy to host to block until dummy computation is done.
+    #   if self.model_state.precompile:
+    #     # Retrieve streamed outputs until streaming is done
+    #     if self.streamable:
+    #       stream_state = None
+    #       while True:
+    #         stream_outs = self.dequeue_stream_output()
+    #         _, stream_state = self.post_processing_stream(
+    #             stream_outs, stream_state
+    #         )
+    #         if stream_outs is None:
+    #           break
+    #     outs = self.output_to_host(init_dummy_outputs, self.batch_size)
+    #     if not self.streamable:
+    #       # Warm up post processor.
+    #       self.post_processing(outs)
+    logging.info("Finished register LMDecode continuous batching input_shape: {}".format(input_shape))
+
+
+  # greedy prefill and insert pjit functions
+  def _pjit_device_fn_prefill_and_insert(
+    self, jax_func, input_pspecs: PSpecs, batch_size: int
+  )-> Callable[[DeviceTensors, DeviceTensors, DeviceTensors, DeviceTensors], DeviceTensors]:
+    """Returns a pjit-ed model function with input handling."""
+    def _wrapped_fn_greedy_prefill_and_insert(
+        mdl_vars, inputs, decode_state, 
+        # decode_cache, 
+        slot_idx):
+      # Remove padding on the vars.
+      # mdl_vars = jax.tree_util.tree_map(
+      #     remove_padding, mdl_vars, self.model_state.mdl_var_unpadded_shapes
+      # )
+      mdl_vars = jax.tree_util.tree_map(
+          jax.lax.with_sharding_constraint,
+          mdl_vars,
+          self.model_state.mdl_var_pspecs,
+      )
+
+      # Only one core has real data, others have zeros. Summing on the
+      # leading `cores` dimension can make data replicated.
+      def _replicate(x):
+        return jax.lax.with_sharding_constraint(
+            jnp.sum(x, axis=0, promote_integers=False), None
+        )
+
+      inputs = jax.tree_util.tree_map(_replicate, inputs)
+      step, batched_inputs, non_batched_inputs = inputs
+      prng_key = jax.random.fold_in(self._prng_key, step)
+      outputs = jax_func(
+          mdl_vars, prng_key, batched_inputs, 
+          # non_batched_inputs,
+          # decode_input_batch, 
+          decode_state, 
+          # decode_cache, 
+          slot_idx
+      )
+      # This assumes that outputs are generated after previous host calls, and
+      # it is guaranteed by data dependency.
+      if self.streamable:
+
+        def _mark_done(dummy, _):
+          del dummy
+          self.mark_stream_output_done()
+
+        hcb.id_tap(_mark_done, outputs, device_index=self.callback_device_index)
+        # Unused final outputs. Return something to make output_to_host
+        # blocking.
+        return jnp.zeros((batch_size,), dtype=jnp.int32)
+
+      return outputs
+
+    # pjit-ed function.
+    self.model_state.mdl_var_pspecs.update(self.decode_cache_pspecs)
+    if self._enable_auto_sharding:
+      return pjit.pjit(
+          _wrapped_fn_greedy_prefill_and_insert,
+          in_shardings=(pjit.AUTO(self.model_state.global_mesh), input_pspecs, None, None),
+          out_shardings=None,
+      )
+    else:
+      return pjit.pjit(
+          _wrapped_fn_greedy_prefill_and_insert,
+          in_shardings=(self.model_state.mdl_var_pspecs, 
+                        input_pspecs, 
+                        None, 
+                        # self.decode_cache_pspecs, 
+                        None),
+          out_shardings=(None, self.decode_cache_pspecs),
+      )
+
+  def greedy_prefill_and_insert_jax_func(
+      self,
+      mdl_vars: NestedJTensor,
+      prng_key: PRNGKey,
+      batched_inputs: NestedJTensor,
+      # non_batched_inputs: NestedJTensor,
+      # decode_input_batch: NestedJTensor,
+      decode_state: NestedJTensor,
+      # decode_cache: NestedJTensor,
+      slot_idx
+  ) -> NestedJTensor:
+    if self._model.fprop_dtype == jnp.bfloat16:
+      # Convert float inputs/vars if fprop dtype is bfloat16.
+      batched_inputs, mdl_vars = jax.tree_map(
+          (lambda x: x.astype(jnp.bfloat16) if x.dtype == jnp.float32 else x),
+          (batched_inputs, mdl_vars),
+      )
+
+    context_p = base_layer.JaxContext.HParams(do_eval=True)
+    k1, k2 = jax.random.split(prng_key)
+    with base_layer.JaxContext.new_context(hparams=context_p):
+      def _model_fn(inputs):
+        outputs = self.call_model_function_greedy_prefill_and_insert(
+          inputs, decode_state, 
+          # decode_cache, 
+          slot_idx,
+          mdl_vars, [k1, k2])  # pytype: disable=wrong-arg-types  # jax-ndarray
+        return outputs
+      decode_state, decode_cache = _model_fn(batched_inputs)
+      logging.info("prefill and insert return decode cache: {}".format(decode_cache))
+      # if base_layer.DECODE_CACHE in updated_vars:
+      #   del updated_vars[base_layer.DECODE_CACHE]
+      # if base_layer.PREFIX_DECODE_CACHE in decode_cache:
+      #   del decode_cache[base_layer.PREFIX_DECODE_CACHE]
+      
+      return decode_state, decode_cache
+
+  def call_model_function_greedy_prefill_and_insert(
+      self, inputs, decode_state, 
+      # decode_cache, 
+      slot_idx, mdl_vars, prng_key):
+    k1, k2 = prng_key
+
+    kwargs = {}
+    if self.streamable:
+
+      def callback_fn(x, _):
+        assert self.model_state.is_primary_host
+        self.enqueue_stream_output(x)
+
+      kwargs['result_callback'] = decoder_utils.StreamingResultCallback(
+          functools.partial(
+              hcb.id_tap, callback_fn, device_index=self.callback_device_index
+          ),
+          interval_steps=self._method_hparams.stream_interval_steps,
+      )
+
+    if (
+        'callback_device_index'
+        in inspect.signature(self._model.decode_with_params).parameters
+    ):
+      kwargs['callback_device_index'] = self.callback_device_index
+
+    decode_state, decode_cache = self._model.apply(
+        mdl_vars,
+        input_batch=inputs,
+        slot_idx=slot_idx,
+        method=self._model.greedy_prefill_and_insert,
+        mutable=[
+            base_layer.NON_TRAINABLE,
+            base_layer.DECODE_CACHE,
+            base_layer.PREFIX_DECODE_CACHE,
+        ],
+        rngs={
+            base_layer.PARAMS: k1,
+            base_layer.RANDOM: k2,
+        },
+        decoder_params=self._method_hparams.decoder,
+        decode_state=decode_state,
+        # decode_cache=decode_cache,
+        **kwargs,
+    )
+    return decode_state, decode_cache
+
+
+  # greedy prefill pjit functions
+  def _pjit_device_fn_greedy_prefill(
+      self, jax_func, input_pspecs: PSpecs, batch_size: int
+  ) -> Callable[[DeviceTensors, DeviceTensors], DeviceTensors]:
+    """Returns a pjit-ed model function with input handling."""
+
+    def _wrapped_fn_greedy_prefill(mdl_vars, inputs):
+      # Remove padding on the vars.
+      # mdl_vars = jax.tree_util.tree_map(
+      #     remove_padding, mdl_vars, self.model_state.mdl_var_unpadded_shapes
+      # )
+      mdl_vars = jax.tree_util.tree_map(
+          jax.lax.with_sharding_constraint,
+          mdl_vars,
+          self.model_state.mdl_var_pspecs,
+      )
+
+      # Only one core has real data, others have zeros. Summing on the
+      # leading `cores` dimension can make data replicated.
+      def _replicate(x):
+        return jax.lax.with_sharding_constraint(
+            jnp.sum(x, axis=0, promote_integers=False), None
+        )
+
+      inputs = jax.tree_util.tree_map(_replicate, inputs)
+      step, batched_inputs, non_batched_inputs = inputs
+      prng_key = jax.random.fold_in(self._prng_key, step)
+      outputs = jax_func(
+          mdl_vars, prng_key, batched_inputs, non_batched_inputs
+      )
+      # This assumes that outputs are generated after previous host calls, and
+      # it is guaranteed by data dependency.
+      if self.streamable:
+
+        def _mark_done(dummy, _):
+          del dummy
+          self.mark_stream_output_done()
+
+        hcb.id_tap(_mark_done, outputs, device_index=self.callback_device_index)
+        # Unused final outputs. Return something to make output_to_host
+        # blocking.
+        return jnp.zeros((batch_size,), dtype=jnp.int32)
+
+      return outputs
+
+    # pjit-ed function.
+    self.model_state.mdl_var_pspecs.update(self.prefill_cache_pspecs)
+    if self._enable_auto_sharding:
+      return pjit.pjit(
+          _wrapped_fn_greedy_prefill,
+          in_shardings=(pjit.AUTO(self.model_state.global_mesh), input_pspecs),
+          out_shardings=None,
+      )
+    else:
+      return pjit.pjit(
+          _wrapped_fn_greedy_prefill,
+          in_shardings=(self.model_state.mdl_var_pspecs, input_pspecs),
+          out_shardings=(None, self.decode_cache_pspecs),
+      )
+
+  def greedy_prefill_jax_func(
+      self,
+      mdl_vars: NestedJTensor,
+      prng_key: PRNGKey,
+      batched_inputs: NestedJTensor,
+      non_batched_inputs: NestedJTensor,
+  ) -> NestedJTensor:
+    if self._model.fprop_dtype == jnp.bfloat16:
+      # Convert float inputs/vars if fprop dtype is bfloat16.
+      batched_inputs, mdl_vars = jax.tree_map(
+          (lambda x: x.astype(jnp.bfloat16) if x.dtype == jnp.float32 else x),
+          (batched_inputs, mdl_vars),
+      )
+
+    context_p = base_layer.JaxContext.HParams(do_eval=True)
+    k1, k2 = jax.random.split(prng_key)
+    with base_layer.JaxContext.new_context(hparams=context_p):
+
+      def _model_fn(inputs):
+        outputs = self.call_model_function_greedy_prefill(inputs, mdl_vars, [k1, k2])  # pytype: disable=wrong-arg-types  # jax-ndarray
+        return outputs
+
+      if isinstance(non_batched_inputs, tuple) and not non_batched_inputs:
+        outputs = _model_fn(batched_inputs)
+      else:
+
+        def _build_branch_model_fn(branch_key):
+          """Gets model_fn for each branch."""
+
+          def _branch_model_fn(inputs):
+            branch_inputs = self.get_branch_inputs(inputs, branch_key)
+            branch_outputs = _model_fn(branch_inputs)
+            return self.post_process_branch_outputs(branch_outputs, branch_key)
+
+          return _branch_model_fn
+
+        branch_fns = [
+            _build_branch_model_fn(branch_key)
+            for branch_key in self._branch_selector.branch_keys
+        ]
+        branch_index = non_batched_inputs
+        outputs = jax.lax.switch(branch_index, branch_fns, batched_inputs)
+
+    return outputs
+
+  def call_model_function_greedy_prefill(self, inputs, mdl_vars, prng_key):
+    k1, k2 = prng_key
+
+    kwargs = {}
+    if self.streamable:
+
+      def callback_fn(x, _):
+        assert self.model_state.is_primary_host
+        self.enqueue_stream_output(x)
+
+      kwargs['result_callback'] = decoder_utils.StreamingResultCallback(
+          functools.partial(
+              hcb.id_tap, callback_fn, device_index=self.callback_device_index
+          ),
+          interval_steps=self._method_hparams.stream_interval_steps,
+      )
+
+    if (
+        'callback_device_index'
+        in inspect.signature(self._model.decode_with_params).parameters
+    ):
+      kwargs['callback_device_index'] = self.callback_device_index
+
+    # prefill
+    decode_data, updated_vars = self._model.apply(
+        mdl_vars,
+        input_batch=inputs,
+        method=self._model.greedy_prefill,
+        mutable=[
+            base_layer.NON_TRAINABLE,
+            base_layer.DECODE_CACHE,
+            base_layer.PREFIX_DECODE_CACHE,
+        ],
+        rngs={
+            base_layer.PARAMS: k1,
+            base_layer.RANDOM: k2,
+        },
+        decoder_params=self._method_hparams.decoder,
+        **kwargs,
+    )
+    return decode_data, updated_vars
+
+
+  # greedy init decode state pjit functions
+  def _pjit_device_fn_greedy_init_decode_state(
+      self, jax_func, input_pspecs: PSpecs, batch_size: int
+  ) -> Callable[[DeviceTensors, DeviceTensors, DeviceTensors], DeviceTensors]:
+    """Returns a pjit-ed model function with input handling."""
+
+    def _wrapped_fn_greedy_init_decode_state(mdl_vars, inputs, decode_data):
+      # Remove padding on the vars.
+      # mdl_vars = jax.tree_util.tree_map(
+      #     remove_padding, mdl_vars, self.model_state.mdl_var_unpadded_shapes
+      # )
+      mdl_vars = jax.tree_util.tree_map(
+          jax.lax.with_sharding_constraint,
+          mdl_vars,
+          self.model_state.mdl_var_pspecs,
+      )
+
+      # Only one core has real data, others have zeros. Summing on the
+      # leading `cores` dimension can make data replicated.
+      def _replicate(x):
+        return jax.lax.with_sharding_constraint(
+            jnp.sum(x, axis=0, promote_integers=False), None
+        )
+
+      logging.info("before calling init decode state replicate")
+      inputs = jax.tree_util.tree_map(_replicate, inputs)
+      step, batched_inputs, non_batched_inputs = inputs
+      prng_key = jax.random.fold_in(self._prng_key, step)
+      logging.info("before calling init decode state jax func")
+      outputs = jax_func(
+          mdl_vars, prng_key, batched_inputs, non_batched_inputs, decode_data
+      )
+      # This assumes that outputs are generated after previous host calls, and
+      # it is guaranteed by data dependency.
+      if self.streamable:
+
+        def _mark_done(dummy, _):
+          del dummy
+          self.mark_stream_output_done()
+
+        hcb.id_tap(_mark_done, outputs, device_index=self.callback_device_index)
+        # Unused final outputs. Return something to make output_to_host
+        # blocking.
+        return jnp.zeros((batch_size,), dtype=jnp.int32)
+
+      return outputs
+
+    # pjit-ed function.
+    self.model_state.mdl_var_pspecs.update(self.decode_cache_pspecs)
+    if self._enable_auto_sharding:
+      return pjit.pjit(
+          _wrapped_fn_greedy_init_decode_state,
+          in_shardings=(pjit.AUTO(self.model_state.global_mesh), input_pspecs, None),
+          out_shardings=None,
+      )
+    else:
+      return pjit.pjit(
+          _wrapped_fn_greedy_init_decode_state,
+          in_shardings=(self.model_state.mdl_var_pspecs, input_pspecs, None),
+          out_shardings=(None, self.decode_cache_pspecs),
+      )
+
+  def greedy_init_decode_state_jax_func(
+      self,
+      mdl_vars: NestedJTensor,
+      prng_key: PRNGKey,
+      batched_inputs: NestedJTensor,
+      non_batched_inputs: NestedJTensor,
+      decode_data: NestedJTensor
+  ) -> NestedJTensor:
+    if self._model.fprop_dtype == jnp.bfloat16:
+      # Convert float inputs/vars if fprop dtype is bfloat16.
+      batched_inputs, mdl_vars = jax.tree_map(
+          (lambda x: x.astype(jnp.bfloat16) if x.dtype == jnp.float32 else x),
+          (batched_inputs, mdl_vars),
+      )
+
+    context_p = base_layer.JaxContext.HParams(do_eval=True)
+    k1, k2 = jax.random.split(prng_key)
+    with base_layer.JaxContext.new_context(hparams=context_p):
+
+      def _model_fn(inputs):
+        outputs = self.call_model_function_greedy_init_decode_state(
+          inputs, decode_data, mdl_vars, [k1, k2])  # pytype: disable=wrong-arg-types  # jax-ndarray
+        return outputs
+
+      if isinstance(non_batched_inputs, tuple) and not non_batched_inputs:
+        logging.info("before calling init decode state model_fn")
+        outputs = _model_fn(batched_inputs)
+      else:
+
+        def _build_branch_model_fn(branch_key):
+          """Gets model_fn for each branch."""
+
+          def _branch_model_fn(inputs):
+            branch_inputs = self.get_branch_inputs(inputs, branch_key)
+            branch_outputs = _model_fn(branch_inputs)
+            return self.post_process_branch_outputs(branch_outputs, branch_key)
+
+          return _branch_model_fn
+
+        branch_fns = [
+            _build_branch_model_fn(branch_key)
+            for branch_key in self._branch_selector.branch_keys
+        ]
+        branch_index = non_batched_inputs
+        outputs = jax.lax.switch(branch_index, branch_fns, batched_inputs)
+
+    return outputs
+
+  def call_model_function_greedy_init_decode_state(self, inputs, decode_data, mdl_vars, prng_key):
+    k1, k2 = prng_key
+
+    kwargs = {}
+    if self.streamable:
+
+      def callback_fn(x, _):
+        assert self.model_state.is_primary_host
+        self.enqueue_stream_output(x)
+
+      kwargs['result_callback'] = decoder_utils.StreamingResultCallback(
+          functools.partial(
+              hcb.id_tap, callback_fn, device_index=self.callback_device_index
+          ),
+          interval_steps=self._method_hparams.stream_interval_steps,
+      )
+
+    if (
+        'callback_device_index'
+        in inspect.signature(self._model.decode_with_params).parameters
+    ):
+      kwargs['callback_device_index'] = self.callback_device_index
+
+    # initialize decoding state
+    logging.info("before calling init decode state apply func")
+    init_decode_state, updated_vars = self._model.apply(
+        mdl_vars,
+        input_batch=inputs,
+        decode_data=decode_data,
+        method=self._model.greedy_init_decode_state,
+        mutable=[
+            base_layer.NON_TRAINABLE,
+            base_layer.DECODE_CACHE,
+            base_layer.PREFIX_DECODE_CACHE,
+        ],
+        rngs={
+            base_layer.PARAMS: k1,
+            base_layer.RANDOM: k2,
+        },
+        decoder_params=self._method_hparams.decoder,
+        **kwargs,
+    )
+    return init_decode_state, updated_vars
+
+
+  # greedy decode single step pjit functions
+  def _pjit_device_fn_greedy_decode_step(
+      self, jax_func, input_pspecs: PSpecs, batch_size: int
+  ) -> Callable[[DeviceTensors, DeviceTensors], DeviceTensors]:
+    """Returns a pjit-ed model function with input handling."""
+
+    def _wrapped_fn_greedy_decode_step(mdl_vars, decode_state):
+      # Remove padding on the vars.
+      # mdl_vars = jax.tree_util.tree_map(
+      #     remove_padding, mdl_vars, self.model_state.mdl_var_unpadded_shapes
+      # )
+      mdl_vars = jax.tree_util.tree_map(
+          jax.lax.with_sharding_constraint,
+          mdl_vars,
+          self.model_state.mdl_var_pspecs,
+      )
+
+      # Only one core has real data, others have zeros. Summing on the
+      # leading `cores` dimension can make data replicated.
+      def _replicate(x):
+        return jax.lax.with_sharding_constraint(
+            jnp.sum(x, axis=0, promote_integers=False), None
+        )
+
+      # inputs = jax.tree_util.tree_map(_replicate, inputs)
+      # step, batched_inputs, non_batched_inputs = inputs
+      # prng_key = jax.random.fold_in(self._prng_key, step)
+      prng_key = self._prng_key
+      outputs = jax_func(
+          mdl_vars, prng_key, decode_state
+      )
+      # This assumes that outputs are generated after previous host calls, and
+      # it is guaranteed by data dependency.
+      if self.streamable:
+
+        def _mark_done(dummy, _):
+          del dummy
+          self.mark_stream_output_done()
+
+        hcb.id_tap(_mark_done, outputs, device_index=self.callback_device_index)
+        # Unused final outputs. Return something to make output_to_host
+        # blocking.
+        return jnp.zeros((batch_size,), dtype=jnp.int32)
+
+      return outputs
+
+    # pjit-ed function.
+    self.model_state.mdl_var_pspecs.update(self.decode_cache_pspecs)
+    if self._enable_auto_sharding:
+      return pjit.pjit(
+          _wrapped_fn_greedy_decode_step,
+          in_shardings=(pjit.AUTO(self.model_state.global_mesh), None),
+          out_shardings=None,
+      )
+    else:
+      return pjit.pjit(
+          _wrapped_fn_greedy_decode_step,
+          in_shardings=(self.model_state.mdl_var_pspecs, None),
+          out_shardings=(None, self.decode_cache_pspecs),
+      )
+
+  def greedy_decode_step_jax_func(
+      self,
+      mdl_vars: NestedJTensor,
+      prng_key: PRNGKey,
+      # batched_inputs: NestedJTensor,
+      # non_batched_inputs: NestedJTensor,
+      decode_state: NestedJTensor
+  ) -> NestedJTensor:
+    if self._model.fprop_dtype == jnp.bfloat16:
+      # Convert float inputs/vars if fprop dtype is bfloat16.
+      # batched_inputs, mdl_vars = jax.tree_map(
+      #     (lambda x: x.astype(jnp.bfloat16) if x.dtype == jnp.float32 else x),
+      #     (batched_inputs, mdl_vars),
+      # )
+      mdl_vars = jax.tree_map(
+          (lambda x: x.astype(jnp.bfloat16) if x.dtype == jnp.float32 else x),
+          (mdl_vars),
+      )
+
+    context_p = base_layer.JaxContext.HParams(do_eval=True)
+    k1, k2 = jax.random.split(prng_key)
+    with base_layer.JaxContext.new_context(hparams=context_p):
+      def _model_fn(decode_state):
+        outputs = self.call_model_function_greedy_decode_step(
+          decode_state, mdl_vars, [k1, k2])  # pytype: disable=wrong-arg-types  # jax-ndarray
+        return outputs
+
+      outputs = _model_fn(decode_state)
+
+    return outputs
+
+  def call_model_function_greedy_decode_step(self, decode_state, mdl_vars, prng_key):
+    k1, k2 = prng_key
+
+    kwargs = {}
+    if self.streamable:
+
+      def callback_fn(x, _):
+        assert self.model_state.is_primary_host
+        self.enqueue_stream_output(x)
+
+      kwargs['result_callback'] = decoder_utils.StreamingResultCallback(
+          functools.partial(
+              hcb.id_tap, callback_fn, device_index=self.callback_device_index
+          ),
+          interval_steps=self._method_hparams.stream_interval_steps,
+      )
+
+    if (
+        'callback_device_index'
+        in inspect.signature(self._model.decode_with_params).parameters
+    ):
+      kwargs['callback_device_index'] = self.callback_device_index
+
+    # decode single step
+    decode_state, updated_vars = self._model.apply(
+        mdl_vars,
+        decode_state=decode_state,
+        method=self._model.greedy_decode_step,
+        mutable=[
+            base_layer.NON_TRAINABLE,
+            base_layer.DECODE_CACHE,
+            base_layer.PREFIX_DECODE_CACHE,
+        ],
+        rngs={
+            base_layer.PARAMS: k1,
+            base_layer.RANDOM: k2,
+        },
+        decoder_params=self._method_hparams.decoder,
+        **kwargs,
+    )
+    return decode_state, updated_vars
+
+
+  # greedy decode pjit functions
+  def _pjit_device_fn_greedy_decode(
+      self, jax_func, input_pspecs: PSpecs, batch_size: int
+  ) -> Callable[[DeviceTensors, DeviceTensors, DeviceTensors], DeviceTensors]:
+    """Returns a pjit-ed model function with input handling."""
+
+    def _wrapped_fn(mdl_vars, inputs, decode_data):
+      # Remove padding on the vars.
+      # mdl_vars = jax.tree_util.tree_map(
+      #     remove_padding, mdl_vars, self.model_state.mdl_var_unpadded_shapes
+      # )
+      mdl_vars = jax.tree_util.tree_map(
+          jax.lax.with_sharding_constraint,
+          mdl_vars,
+          self.model_state.mdl_var_pspecs,
+      )
+
+      # Only one core has real data, others have zeros. Summing on the
+      # leading `cores` dimension can make data replicated.
+      def _replicate(x):
+        return jax.lax.with_sharding_constraint(
+            jnp.sum(x, axis=0, promote_integers=False), None
+        )
+
+      inputs = jax.tree_util.tree_map(_replicate, inputs)
+      step, batched_inputs, non_batched_inputs = inputs
+      prng_key = jax.random.fold_in(self._prng_key, step)
+      outputs = jax_func(
+          mdl_vars, prng_key, batched_inputs, non_batched_inputs, decode_data
+      )
+      # This assumes that outputs are generated after previous host calls, and
+      # it is guaranteed by data dependency.
+      if self.streamable:
+
+        def _mark_done(dummy, _):
+          del dummy
+          self.mark_stream_output_done()
+
+        hcb.id_tap(_mark_done, outputs, device_index=self.callback_device_index)
+        # Unused final outputs. Return something to make output_to_host
+        # blocking.
+        return jnp.zeros((batch_size,), dtype=jnp.int32)
+
+      return outputs
+
+    # pjit-ed function.
+    if self._enable_auto_sharding:
+      return pjit.pjit(
+          _wrapped_fn,
+          in_shardings=(pjit.AUTO(self.model_state.global_mesh), input_pspecs, None),
+          out_shardings=None,
+      )
+    else:
+      return pjit.pjit(
+          _wrapped_fn,
+          in_shardings=(self.model_state.mdl_var_pspecs, input_pspecs, None),
+          out_shardings=(None, self.decode_cache_pspecs),
+      )
+
+  def greedy_decode_jax_func(
+      self,
+      mdl_vars: NestedJTensor,
+      prng_key: PRNGKey,
+      batched_inputs: NestedJTensor,
+      non_batched_inputs: NestedJTensor,
+      decode_data: NestedJTensor,
+  ) -> NestedJTensor:
+    if self._model.fprop_dtype == jnp.bfloat16:
+      # Convert float inputs/vars if fprop dtype is bfloat16.
+      batched_inputs, mdl_vars = jax.tree_map(
+          (lambda x: x.astype(jnp.bfloat16) if x.dtype == jnp.float32 else x),
+          (batched_inputs, mdl_vars),
+      )
+
+    context_p = base_layer.JaxContext.HParams(do_eval=True)
+    k1, k2 = jax.random.split(prng_key)
+    with base_layer.JaxContext.new_context(hparams=context_p):
+
+      def _model_fn(inputs):
+        outputs = self.call_model_function_greedy_decode(
+          inputs, decode_data, mdl_vars, [k1, k2])  # pytype: disable=wrong-arg-types  # jax-ndarray
+        return outputs
+
+      if isinstance(non_batched_inputs, tuple) and not non_batched_inputs:
+        outputs = _model_fn(batched_inputs)
+      else:
+
+        def _build_branch_model_fn(branch_key):
+          """Gets model_fn for each branch."""
+
+          def _branch_model_fn(inputs):
+            branch_inputs = self.get_branch_inputs(inputs, branch_key)
+            branch_outputs = _model_fn(branch_inputs)
+            return self.post_process_branch_outputs(branch_outputs, branch_key)
+
+          return _branch_model_fn
+
+        branch_fns = [
+            _build_branch_model_fn(branch_key)
+            for branch_key in self._branch_selector.branch_keys
+        ]
+        branch_index = non_batched_inputs
+        outputs = jax.lax.switch(branch_index, branch_fns, batched_inputs)
+
+      if (
+          self.method_params.cast_bfloat16_outputs
+          and self._model.fprop_dtype == jnp.bfloat16
+      ):
+        # Convert bfloat16 back to float32.
+        def maybe_to_float32(x):
+          x = jnp.asarray(x)
+          if x.dtype == jnp.bfloat16:
+            return x.astype(jnp.float32)
+          return x
+
+        outputs = jax.tree_map(maybe_to_float32, outputs)
+      return outputs
+
+  def call_model_function_greedy_decode(self, inputs, decode_data, mdl_vars, prng_key):
+    k1, k2 = prng_key
+
+    kwargs = {}
+    if self.streamable:
+
+      def callback_fn(x, _):
+        assert self.model_state.is_primary_host
+        self.enqueue_stream_output(x)
+
+      kwargs['result_callback'] = decoder_utils.StreamingResultCallback(
+          functools.partial(
+              hcb.id_tap, callback_fn, device_index=self.callback_device_index
+          ),
+          interval_steps=self._method_hparams.stream_interval_steps,
+      )
+
+    if (
+        'callback_device_index'
+        in inspect.signature(self._model.decode_with_params).parameters
+    ):
+      kwargs['callback_device_index'] = self.callback_device_index
+
+    # initialize decoding state
+    init_decode_state, updated_vars = self._model.apply(
+        mdl_vars,
+        input_batch=inputs,
+        decode_data=decode_data,
+        method=self._model.greedy_init_decode_state,
+        mutable=[
+            base_layer.NON_TRAINABLE,
+            base_layer.DECODE_CACHE,
+            base_layer.PREFIX_DECODE_CACHE,
+        ],
+        rngs={
+            base_layer.PARAMS: k1,
+            base_layer.RANDOM: k2,
+        },
+        decoder_params=self._method_hparams.decoder,
+        **kwargs,
+    )
+    mdl_vars.update(updated_vars)
+
+    # decoding while loop
+    decode_state, updated_vars = self._model.apply(
+        mdl_vars,
+        decode_state=init_decode_state,
+        method=self._model.greedy_decode_step_while,
+        mutable=[
+            base_layer.NON_TRAINABLE,
+            base_layer.DECODE_CACHE,
+            base_layer.PREFIX_DECODE_CACHE,
+        ],
+        rngs={
+            base_layer.PARAMS: k1,
+            base_layer.RANDOM: k2,
+        },
+        **kwargs,
+    )
+    return decode_state, updated_vars
+
+
+  # process results pjit function
+  def _pjit_device_fn_greedy_process_result(
+      self, jax_func, input_pspecs: PSpecs, batch_size: int
+  ) -> Callable[[DeviceTensors, DeviceTensors], DeviceTensors]:
+    """Returns a pjit-ed model function with input handling."""
+
+    def _wrapped_fn_greedy_process_result(mdl_vars, decode_state):
+      # Remove padding on the vars.
+      # mdl_vars = jax.tree_util.tree_map(
+      #     remove_padding, mdl_vars, self.model_state.mdl_var_unpadded_shapes
+      # )
+      mdl_vars = jax.tree_util.tree_map(
+          jax.lax.with_sharding_constraint,
+          mdl_vars,
+          self.model_state.mdl_var_pspecs,
+      )
+
+      # Only one core has real data, others have zeros. Summing on the
+      # leading `cores` dimension can make data replicated.
+      # def _replicate(x):
+      #   return jax.lax.with_sharding_constraint(
+      #       jnp.sum(x, axis=0, promote_integers=False), None
+      #   )
+
+      # inputs = jax.tree_util.tree_map(_replicate, inputs)
+      # _, batched_inputs, _ = inputs
+      # prng_key = jax.random.fold_in(self._prng_key, step)
+      prng_key = self._prng_key
+      outputs = jax_func(
+          mdl_vars, prng_key, 
+          # batched_inputs, 
+          decode_state
+      )
+      # This assumes that outputs are generated after previous host calls, and
+      # it is guaranteed by data dependency.
+      if self.streamable:
+
+        def _mark_done(dummy, _):
+          del dummy
+          self.mark_stream_output_done()
+
+        hcb.id_tap(_mark_done, outputs, device_index=self.callback_device_index)
+        # Unused final outputs. Return something to make output_to_host
+        # blocking.
+        return jnp.zeros((batch_size,), dtype=jnp.int32)
+
+      return outputs
+
+    # pjit-ed function.
+    if self._enable_auto_sharding:
+      return pjit.pjit(
+          _wrapped_fn_greedy_process_result,
+          in_shardings=(pjit.AUTO(self.model_state.global_mesh), None),
+          out_shardings=None,
+      )
+    else:
+      return pjit.pjit(
+          _wrapped_fn_greedy_process_result,
+          in_shardings=(self.model_state.mdl_var_pspecs, None),
+          out_shardings=None,
+      )
+    
+  def fetch_output(
+      self, model_fn_outputs: NestedJTensor
+  ) -> NestedJTensor:
+    model_fn_inputs = model_fn_outputs
+    fetched_output = servable_lm_common.decode_fetch_output(
+        model_fn_outputs,
+        model_fn_inputs,
+        self._method_hparams.t5_model,
+        self._method_hparams.fetch_prefix_lengths_from_inputs,
+    )
+    fetched_output.prefix_lengths = jnp.squeeze(fetched_output.prefix_lengths, axis=1)
+    fetched_output.scores = jnp.squeeze(fetched_output.scores, axis=2)
+    logging.info("fetched_output: {}".format(fetched_output))
+    return fetched_output
+
+  def greedy_process_result_jax_func(
+      self,
+      mdl_vars: NestedJTensor,
+      prng_key: PRNGKey,
+      # batched_inputs: NestedJTensor,
+      decode_state: NestedJTensor,
+  ) -> NestedJTensor:
+    if self._model.fprop_dtype == jnp.bfloat16:
+      # Convert float inputs/vars if fprop dtype is bfloat16.
+      # batched_inputs, mdl_vars = jax.tree_map(
+      #     (lambda x: x.astype(jnp.bfloat16) if x.dtype == jnp.float32 else x),
+      #     (batched_inputs, mdl_vars),
+      # )
+      mdl_vars = jax.tree_map(
+          (lambda x: x.astype(jnp.bfloat16) if x.dtype == jnp.float32 else x),
+          (mdl_vars),
+      )
+
+    context_p = base_layer.JaxContext.HParams(do_eval=True)
+    k1, k2 = jax.random.split(prng_key)
+    with base_layer.JaxContext.new_context(hparams=context_p):
+
+      def _model_fn(decode_state):
+        outputs = self.call_model_function_greedy_process_result(
+          # inputs,
+          decode_state, mdl_vars, [k1, k2])  # pytype: disable=wrong-arg-types  # jax-ndarray
+        # DECODE_CACHE are not read by caller. But they can be large. Tell XLA
+        # to remove it from output. Note MLP decoder don't have DECODE_CACHE.
+        updated_vars = outputs[1]
+        if base_layer.DECODE_CACHE in updated_vars:
+          del updated_vars[base_layer.DECODE_CACHE]
+        if base_layer.PREFIX_DECODE_CACHE in updated_vars:
+          del updated_vars[base_layer.PREFIX_DECODE_CACHE]
+        return outputs
+
+      outputs = _model_fn(decode_state)
+
+      if (
+          self.method_params.cast_bfloat16_outputs
+          and self._model.fprop_dtype == jnp.bfloat16
+      ):
+        # Convert bfloat16 back to float32.
+        def maybe_to_float32(x):
+          x = jnp.asarray(x)
+          if x.dtype == jnp.bfloat16:
+            return x.astype(jnp.float32)
+          return x
+
+        outputs = jax.tree_map(maybe_to_float32, outputs)
+      return self.fetch_output(outputs)
+
+  def call_model_function_greedy_process_result(self, decode_state, mdl_vars, prng_key):
+    k1, k2 = prng_key
+
+    kwargs = {}
+    if self.streamable:
+
+      def callback_fn(x, _):
+        assert self.model_state.is_primary_host
+        self.enqueue_stream_output(x)
+
+      kwargs['result_callback'] = decoder_utils.StreamingResultCallback(
+          functools.partial(
+              hcb.id_tap, callback_fn, device_index=self.callback_device_index
+          ),
+          interval_steps=self._method_hparams.stream_interval_steps,
+      )
+
+    if (
+        'callback_device_index'
+        in inspect.signature(self._model.decode_with_params).parameters
+    ):
+      kwargs['callback_device_index'] = self.callback_device_index
+
+    # process results
+    outputs = self._model.apply(
+        mdl_vars,
+        decode_state=decode_state,
+        # input_batch=inputs,
+        method=self._model.greedy_process_result,
+        mutable=[
+            base_layer.NON_TRAINABLE,
+            base_layer.DECODE_CACHE,
+            base_layer.PREFIX_DECODE_CACHE,
+        ],
+        rngs={
+            base_layer.PARAMS: k1,
+            base_layer.RANDOM: k2,
+        },
+        decoder_params=self._method_hparams.decoder,
+        **kwargs,
+    )
+    return outputs  
+
+  def call_model_function(self, inputs, mdl_vars, prng_key):
+    k1, k2 = prng_key
+
+    kwargs = {}
+    if self.streamable:
+
+      def callback_fn(x, _):
+        assert self.model_state.is_primary_host
+        self.enqueue_stream_output(x)
+
+      kwargs['result_callback'] = decoder_utils.StreamingResultCallback(
+          functools.partial(
+              hcb.id_tap, callback_fn, device_index=self.callback_device_index
+          ),
+          interval_steps=self._method_hparams.stream_interval_steps,
+      )
+
+    if (
+        'callback_device_index'
+        in inspect.signature(self._model.decode_with_params).parameters
+    ):
+      kwargs['callback_device_index'] = self.callback_device_index
+
+    # prefill
+    decode_data, updated_vars = self._model.apply(
+        mdl_vars,
+        input_batch=inputs,
+        method=self._model.greedy_prefill,
+        mutable=[
+            base_layer.NON_TRAINABLE,
+            base_layer.DECODE_CACHE,
+            base_layer.PREFIX_DECODE_CACHE,
+        ],
+        rngs={
+            base_layer.PARAMS: k1,
+            base_layer.RANDOM: k2,
+        },
+        decoder_params=self._method_hparams.decoder,
+        **kwargs,
+    )
+    mdl_vars.update(updated_vars)
+    logging.info('model state vars: {}'.format(mdl_vars))
+
+    # initialize decoding state
+    init_decode_state, updated_vars = self._model.apply(
+        mdl_vars,
+        input_batch=inputs,
+        decode_data=decode_data,
+        method=self._model.greedy_init_decode_state,
+        mutable=[
+            base_layer.NON_TRAINABLE,
+            base_layer.DECODE_CACHE,
+            base_layer.PREFIX_DECODE_CACHE,
+        ],
+        rngs={
+            base_layer.PARAMS: k1,
+            base_layer.RANDOM: k2,
+        },
+        decoder_params=self._method_hparams.decoder,
+        **kwargs,
+    )
+    mdl_vars.update(updated_vars)
+
+    # decoding while loop
+    decode_state, updated_vars = self._model.apply(
+        mdl_vars,
+        decode_state=init_decode_state,
+        method=self._model.greedy_decode_step_while,
+        mutable=[
+            base_layer.NON_TRAINABLE,
+            base_layer.DECODE_CACHE,
+            base_layer.PREFIX_DECODE_CACHE,
+        ],
+        rngs={
+            base_layer.PARAMS: k1,
+            base_layer.RANDOM: k2,
+        },
+        **kwargs,
+    )
+    mdl_vars.update(updated_vars)
+
+    # process results
+    outputs = self._model.apply(
+        mdl_vars,
+        decode_state=decode_state,
+        input_batch=inputs,
+        decode_data=decode_data,
+        method=self._model.greedy_process_result,
+        mutable=[
+            base_layer.NON_TRAINABLE,
+            base_layer.DECODE_CACHE,
+            base_layer.PREFIX_DECODE_CACHE,
+        ],
+        rngs={
+            base_layer.PARAMS: k1,
+            base_layer.RANDOM: k2,
+        },
+        decoder_params=self._method_hparams.decoder,
+        **kwargs,
+    )
+    return outputs
+
+
+  # process results with selected index pjit function
+  def _pjit_device_fn_greedy_process_result_with_idx(
+      self, jax_func, input_pspecs: PSpecs, batch_size: int
+  ) -> Callable[[DeviceTensors, DeviceTensors, DeviceTensors], DeviceTensors]:
+    """Returns a pjit-ed model function with input handling."""
+
+    def _wrapped_fn_greedy_process_result_with_idx(mdl_vars, decode_state, slot_idx):
+      mdl_vars = jax.tree_util.tree_map(
+          jax.lax.with_sharding_constraint,
+          mdl_vars,
+          self.model_state.mdl_var_pspecs,
+      )
+
+      prng_key = self._prng_key
+      outputs = jax_func(
+          mdl_vars, prng_key, 
+          decode_state,
+          slot_idx
+      )
+      # This assumes that outputs are generated after previous host calls, and
+      # it is guaranteed by data dependency.
+      if self.streamable:
+
+        def _mark_done(dummy, _):
+          del dummy
+          self.mark_stream_output_done()
+
+        hcb.id_tap(_mark_done, outputs, device_index=self.callback_device_index)
+        # Unused final outputs. Return something to make output_to_host
+        # blocking.
+        return jnp.zeros((batch_size,), dtype=jnp.int32)
+
+      return outputs
+
+    # pjit-ed function.
+    if self._enable_auto_sharding:
+      return pjit.pjit(
+          _wrapped_fn_greedy_process_result_with_idx,
+          in_shardings=(pjit.AUTO(self.model_state.global_mesh), None, None),
+          out_shardings=None,
+      )
+    else:
+      return pjit.pjit(
+          _wrapped_fn_greedy_process_result_with_idx,
+          in_shardings=(self.model_state.mdl_var_pspecs, None, None),
+          out_shardings=None,
+      )
+    
+  def greedy_process_result_with_idx_jax_func(
+      self,
+      mdl_vars: NestedJTensor,
+      prng_key: PRNGKey,
+      decode_state: NestedJTensor,
+      slot_idx
+  ) -> NestedJTensor:
+    if self._model.fprop_dtype == jnp.bfloat16:
+      mdl_vars = jax.tree_map(
+          (lambda x: x.astype(jnp.bfloat16) if x.dtype == jnp.float32 else x),
+          (mdl_vars),
+      )
+
+    context_p = base_layer.JaxContext.HParams(do_eval=True)
+    k1, k2 = jax.random.split(prng_key)
+    with base_layer.JaxContext.new_context(hparams=context_p):
+
+      def _model_fn(decode_state):
+        outputs = self.call_model_function_greedy_process_result_with_idx(
+          decode_state, slot_idx,
+          mdl_vars, [k1, k2])  # pytype: disable=wrong-arg-types  # jax-ndarray
+        # DECODE_CACHE are not read by caller. But they can be large. Tell XLA
+        # to remove it from output. Note MLP decoder don't have DECODE_CACHE.
+        updated_vars = outputs[1]
+        if base_layer.DECODE_CACHE in updated_vars:
+          del updated_vars[base_layer.DECODE_CACHE]
+        if base_layer.PREFIX_DECODE_CACHE in updated_vars:
+          del updated_vars[base_layer.PREFIX_DECODE_CACHE]
+        return outputs
+
+      outputs = _model_fn(decode_state)
+
+      if (
+          self.method_params.cast_bfloat16_outputs
+          and self._model.fprop_dtype == jnp.bfloat16
+      ):
+        # Convert bfloat16 back to float32.
+        def maybe_to_float32(x):
+          x = jnp.asarray(x)
+          if x.dtype == jnp.bfloat16:
+            return x.astype(jnp.float32)
+          return x
+
+        outputs = jax.tree_map(maybe_to_float32, outputs)
+      return self.fetch_output(outputs)
+
+  def call_model_function_greedy_process_result_with_idx(
+      self, decode_state, slot_idx, mdl_vars, prng_key):
+    k1, k2 = prng_key
+
+    kwargs = {}
+    if self.streamable:
+
+      def callback_fn(x, _):
+        assert self.model_state.is_primary_host
+        self.enqueue_stream_output(x)
+
+      kwargs['result_callback'] = decoder_utils.StreamingResultCallback(
+          functools.partial(
+              hcb.id_tap, callback_fn, device_index=self.callback_device_index
+          ),
+          interval_steps=self._method_hparams.stream_interval_steps,
+      )
+
+    if (
+        'callback_device_index'
+        in inspect.signature(self._model.decode_with_params).parameters
+    ):
+      kwargs['callback_device_index'] = self.callback_device_index
+
+    # process results
+    outputs = self._model.apply(
+        mdl_vars,
+        decode_state=decode_state,
+        slot_idx=slot_idx,
+        method=self._model.greedy_process_result_with_idx,
+        mutable=[
+            base_layer.NON_TRAINABLE,
+            base_layer.DECODE_CACHE,
+            base_layer.PREFIX_DECODE_CACHE,
+        ],
+        rngs={
+            base_layer.PARAMS: k1,
+            base_layer.RANDOM: k2,
+        },
+        decoder_params=self._method_hparams.decoder,
+        **kwargs,
+    )
+    return outputs  
 
 
 class TextToEmbedding(servable_model.ServableMethod):
@@ -1274,7 +2900,8 @@ class ServableLMModel(servable_model.ServableModel):
       )
     elif method == LMMethodName.GENERATE:
       assert isinstance(method_params, DecodeHParams)
-      return LMDecodeMethod(
+      # return LMDecodeMethod(
+      return LMDecodeMethodContinuousBatching(
           model,
           model_state,
           prng_key,

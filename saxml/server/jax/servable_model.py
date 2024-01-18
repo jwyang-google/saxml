@@ -221,6 +221,7 @@ class ServableMethod(servable_model.ServableMethod):
     return compiled
 
   def _register_for_input_shape(self, input_shape: InputShapeInfo) -> None:
+    logging.info("call jax base register input shape")
     batched_host_dummy = self.get_dummy_inputs(input_shape)
     batched_host_dummy = self.update_extra_inputs(
         batched_host_dummy,
@@ -315,30 +316,30 @@ class ServableMethod(servable_model.ServableMethod):
             self.model_state.global_mesh,
             mdl_var_pspecs,
         )
-
+    
     info.device_fn = device_fn
 
     # Compute with dummy to trigger compilation.
-    if self.model_state.precompile:
-      init_dummy_outputs = self.device_compute(info.dummy_inputs, input_shape)
+    # if self.model_state.precompile:
+    #   init_dummy_outputs = self.device_compute(info.dummy_inputs, input_shape)
 
-    if self.model_state.is_primary_host:
-      # Transfer dummy to host to block until dummy computation is done.
-      if self.model_state.precompile:
-        # Retrieve streamed outputs until streaming is done
-        if self.streamable:
-          stream_state = None
-          while True:
-            stream_outs = self.dequeue_stream_output()
-            _, stream_state = self.post_processing_stream(
-                stream_outs, stream_state
-            )
-            if stream_outs is None:
-              break
-        outs = self.output_to_host(init_dummy_outputs, self.batch_size)
-        if not self.streamable:
-          # Warm up post processor.
-          self.post_processing(outs)
+    # if self.model_state.is_primary_host:
+    #   # Transfer dummy to host to block until dummy computation is done.
+    #   if self.model_state.precompile:
+    #     # Retrieve streamed outputs until streaming is done
+    #     if self.streamable:
+    #       stream_state = None
+    #       while True:
+    #         stream_outs = self.dequeue_stream_output()
+    #         _, stream_state = self.post_processing_stream(
+    #             stream_outs, stream_state
+    #         )
+    #         if stream_outs is None:
+    #           break
+    #     outs = self.output_to_host(init_dummy_outputs, self.batch_size)
+    #     if not self.streamable:
+    #       # Warm up post processor.
+    #       self.post_processing(outs)
 
   @property
   def model_state(self) -> ServableModelState:
@@ -384,6 +385,7 @@ class ServableMethod(servable_model.ServableMethod):
     )
     full_b = global_shape[1]
     if b != full_b:
+      logging.info("b:{}, full_b: {}, global_shape: {}".format(b, full_b, global_shape))
       assert b < full_b
       x = np.concatenate([x, np.repeat(x[:1], full_b - b, 0)], axis=0)
     return x
@@ -394,7 +396,11 @@ class ServableMethod(servable_model.ServableMethod):
       unpadded_input_shape: InputShapeInfo,
       is_dummy: bool,
   ) -> DeviceTensors:
-    info = self._per_bs_infos[self.get_padded_input_shape(unpadded_input_shape)]
+    padded_input_shape = self.get_padded_input_shape(unpadded_input_shape)
+    info = self._per_bs_infos[padded_input_shape]
+    # logging.info("padded input shape: {}, info: {}".format(padded_input_shape, info))
+    # logging.info("global_inputs_shape_dtype in _input_to_device_buffers: {}".format(
+      # info.global_inputs_shape_dtype[1]))
     step = np.array(self._step.next(), dtype=np.int32)
     host_inputs = jax.tree_util.tree_map(
         functools.partial(

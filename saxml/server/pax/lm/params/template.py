@@ -40,6 +40,14 @@ LayerTpl = pax_fiddle.Config[base_layer.BaseLayer]
 class CommonServingTemplate:
   """Common Serving template for language models."""
 
+  # continuous batching only support greedy decoding for now
+  # if you are set ENABLE_CONTINUOUS_BATCHING to true
+  # you should set top_K=1, num_samples=1, batch_size=1
+  ENABLE_CONTINUOUS_BATCHING = False
+  CONTINUOUS_BATCHING_BATCH_SIZE = 1
+  ######
+
+
   ICI_MESH_SHAPE = [1, 1, 8]
   USE_BEAM_SEARCH = False
   BEAM_SEARCH_EARLY_EXIT = False
@@ -203,6 +211,8 @@ class ServingTemplate(
           eos_id=stop_token_ids,
           decode_loop_mesh_axes_transpose=self.DECODE_MESH_TRANSPOSE,
           emb_lookup_style=self.EMB_LOOKUP_STYLE,
+          continuous_batching_batch_size=self.CONTINUOUS_BATCHING_BATCH_SIZE,
+          enable_continuous_batching=self.ENABLE_CONTINUOUS_BATCHING
       )
     else:
       generate_hparams = decoder_hparams.SampleDecoderHParams(

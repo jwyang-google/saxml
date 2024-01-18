@@ -486,6 +486,7 @@ class ServableModel(servable_model.ServableModel):
       partition_specs = jax_task.create_train_state_partition_specs(
           vars_weight_params, discard_opt_states=discard_opt_states
       )
+      logging.info("model partition specs: {}".format(partition_specs))
       if checkpoint_path is not None:
         checkpoint_path = epath.Path(checkpoint_path)
         if not checkpoint_path.is_dir():

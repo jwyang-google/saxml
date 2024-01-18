@@ -82,7 +82,10 @@ class BaseLLaMA(base_experiment.BaseExperiment):
   }
 
   def model(self):
-    model_p = pax_fiddle.Config(layers.LanguageModel, name='xformer_lm')
+    if self.ENABLE_CONTINUOUS_BATCHING:
+      model_p = pax_fiddle.Config(layers.LanguageModelContinuousBatching, name='xformer_lm')
+    else:
+      model_p = pax_fiddle.Config(layers.LanguageModel, name='xformer_lm')
     model_p.lm_tpl.packed_input = False
     model_p.lm_tpl.model_dims = self.MODEL_DIMS
     model_p.lm_tpl.vocab_size = self.VOCAB_SIZE
@@ -202,12 +205,19 @@ class LLaMA7BFP16TPUv5e1(BaseLLaMA):
   def test_mode(self) -> bool:
     return True
 
+
+
+
 # @quantization.for_transformer(quantize_on_the_fly=True)
 @servable_model_registry.register
 class LLaMA7BFP16TPUv5e4(LLaMA7BFP16TPUv5e1):
-  BATCH_SIZE = 1
-  INPUT_SEQ_LEN = 64
-  MAX_DECODE_STEPS = 64
+  ENABLE_CONTINUOUS_BATCHING = False
+
+  INPUT_SEQ_LEN = 1024
+  MAX_DECODE_STEPS = 1024
+  BUCKET_KEYS = [1024]
+
+  BATCH_SIZE = 32
   NUM_SAMPLES = 1
   TOP_K = 1
 
@@ -216,6 +226,22 @@ class LLaMA7BFP16TPUv5e4(LLaMA7BFP16TPUv5e1):
   @property
   def test_mode(self) -> bool:
     return False
+
+@servable_model_registry.register
+class LLaMA7BFP16TPUv5e4_ContinuousBatching(LLaMA7BFP16TPUv5e4):
+  ENABLE_CONTINUOUS_BATCHING = True
+  CONTINUOUS_BATCHING_BATCH_SIZE = 16
+  
+  BATCH_SIZE = 1
+  NUM_SAMPLES = 1
+  TOP_K = 1
+
+
+
+
+@servable_model_registry.register
+class LLaMA7BFP16TPUv5e16(LLaMA7BFP16TPUv5e4):
+  ICI_MESH_SHAPE = [1, 1, 16]
 
 
 @servable_model_registry.register
@@ -356,27 +382,38 @@ class LLaMA70BFP16TPUv5e64(BaseLLaMA):
 @servable_model_registry.register
 # @quantization.for_transformer(quantize_on_the_fly=False)
 class LLaMA70BFP16TPUv5e16(LLaMA70BFP16TPUv5e64):
-  # Decoding params
-  BATCH_SIZE = 36
-  INPUT_SEQ_LEN = 1024
+  # continuous batching
+  ENABLE_CONTINUOUS_BATCHING = True
+  CONTINUOUS_BATCHING_BATCH_SIZE = 1
+  BATCH_SIZE = 1
+
+  # dynamic batching
+  # BATCH_SIZE = 36
+
+  # input/output length
+  INPUT_SEQ_LEN = 64
+  MAX_DECODE_STEPS = 64
+  BUCKET_KEYS = [64]
+  # MAX_DECODE_STEPS = [32, 128, 512, 2048]
+  # BUCKET_KEYS = [32, 128, 512, 2048]
+
+
+  # greedy decoding
   NUM_SAMPLES = 1
   TOP_K = 1
-
-  MAX_DECODE_STEPS = 1024
-  BUCKET_KEYS = [32, 128, 1024]
 
   ICI_MESH_SHAPE = [1, 1, 16]
 
   @property
   def test_mode(self) -> bool:
-    return True
+    return False
   
 
 @servable_model_registry.register
 class LLaMA70BFP16TPUv5e32(LLaMA70BFP16TPUv5e16):
   BATCH_SIZE = 72
-  INPUT_SEQ_LEN = 1024
-  MAX_DECODE_STEPS = 1024
+  INPUT_SEQ_LEN = 2048
+  MAX_DECODE_STEPS = 2048
   BUCKET_KEYS = [2048]
   ICI_MESH_SHAPE = [1, 1, 32]
   

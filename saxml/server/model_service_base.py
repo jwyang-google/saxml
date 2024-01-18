@@ -213,6 +213,7 @@ class PerMethodBatcher:
   def __init__(self):
     self._per_method_queues: Dict[MethodKey, Method] = {}
     self._batch_queue: queue.SimpleQueue[Batch] = queue.SimpleQueue()
+    self._decoding_batch_queue: queue.PriorityQueue[Batch] = queue.SimpleQueue()
     self._global_live_batches_lock: threading.Lock = threading.Lock()
     self._global_live_batches: int = 0
 
@@ -262,7 +263,7 @@ class PerMethodBatcher:
     # Start the batching loop.
     def _batching():
       # Keeps at most 2 active batches in the rest of pipeline.
-      batch_sem = threading.Semaphore(value=2)
+      batch_sem = threading.Semaphore(value=128)
 
       def _finish_batch():
         batch_sem.release()
@@ -271,10 +272,14 @@ class PerMethodBatcher:
 
       while True:
         batch_sem.acquire()
+        logging.info("acquired semaphore: {}, method max_live_batches: {}, batch_size: {}".format(
+          batch_sem._value, method.max_live_batches, method.batch_size))
         rpc_tasks = method.queue.take_batch(batch_size)
+        logging.info("get rpc task")
         if method.admissioner.is_shutdown():
           # This must be an empty task generated after shutdown to unblock this
           # thread.
+          logging.info("break the loop")
           assert len(rpc_tasks) == 1
           assert rpc_tasks[0].rpc is None
           batch_sem.release()
@@ -290,6 +295,7 @@ class PerMethodBatcher:
             _finish_batch,
             unpadded_shape=InputShapeInfo(batch_size=len(rpc_tasks)),
         )
+        logging.info("created new batch")
         # If there is no other unprocessed batch, we enqueue to batch before
         # preprocessing finishes.
         with self._global_live_batches_lock:
@@ -299,7 +305,12 @@ class PerMethodBatcher:
           presync = can_presync and batch.skip_host_sync
           self._global_live_batches += 1
           if presync:
-            self._batch_queue.put(batch)
+            if batch.method.name == "lm.generate":
+              self._decoding_batch_queue.put(batch)
+            else:
+              self._batch_queue.put(batch)
+            # self._batch_queue.put(batch)
+        logging.info("enqueued batch")
         if preprocess_fn is None:
           batch.mark_as_ready()
         else:
@@ -321,8 +332,14 @@ class PerMethodBatcher:
             batch.input_tensors = input_tensors
             batch.unpadded_shape = unpadded_shape
             batch.mark_as_ready()
+        logging.info("preprocessed batch")
         if not presync:
-          self._batch_queue.put(batch)
+          if batch.method.name == "lm.generate":
+            self._decoding_batch_queue.put(batch)
+            logging.info("put batch in queue")
+          else:
+            self._batch_queue.put(batch)
+          # self._batch_queue.put(batch)
         utils.traceprint_all(
             batch.rpc_tasks,
             f'Enqueued and preprocessed batch (batch size {batch.size()})',
@@ -443,6 +460,27 @@ class PerMethodBatcher:
         batch.rpc_tasks,
         f'Dequeued from batch_queue: (qlen {qlen} bs {batch.size()})',
     )
+    return batch
+  
+  def get_decoding_batch(self, block=True) -> Batch:
+    """Dequeues an available batch."""
+    qlen = self._decoding_batch_queue.qsize()  # Approximately.
+    if block:
+      batch = self._decoding_batch_queue.get()
+    else:
+      try:
+        batch = self._decoding_batch_queue.get_nowait()
+      except queue.Empty:
+        batch = None
+    
+    if batch:
+      self._per_method_queues[batch.method].record_batch_size(batch.size())
+      utils.traceprint_all(
+          batch.rpc_tasks,
+          f'Dequeued from decoding_batch_queue: (qlen {qlen} bs {batch.size()})',
+      )
+    else:
+      logging.info("Get batch None")
     return batch
 
 
@@ -673,6 +711,8 @@ class ModelServiceGRPC(ModelService):
       req: message.Message,
       resp: message.Message,
   ) -> Awaitable[Any]:
+    logging.info("enqueue request: {}".format(method))
+
     """Enqueues request, and returns a done future."""
     loop = asyncio.get_running_loop()
     fut = loop.create_future()
@@ -1121,6 +1161,12 @@ class ModelServicesRunner:
           daemon=False,
           name='model_service_runner_primary_worker',
       )
+      self._decoding_thread = threading.Thread(
+        # target=self._run_decoding_loop,
+        target=self._run_decoding_loop_new,
+        daemon=False,
+        name='model_service_runner_decoding_loop',
+      )
       self._keep_warm_thread = threading.Thread(
           target=self._run_keep_warm_loop,
           daemon=True,
@@ -1137,6 +1183,12 @@ class ModelServicesRunner:
           daemon=False,
           name='model_service_runner_secondary_worker',
       )
+      # self._decoding_thread = threading.Thread(
+      #   target=self._run_decoding_loop_new,
+      #   daemon=False,
+      #   name='model_service_runner_decoding_loop',
+      # )
+
     self._loaded_models = LoadedModelManager(primary_host)
     self._batcher.register_method(
         None, MethodKey(_TERMINATE_METHOD_KEY), batch_size=1, max_live_batches=1
@@ -1245,6 +1297,8 @@ class ModelServicesRunner:
     """Start the worker and server threads, non-blocking."""
     self._multihost_sync.initialize(self._get_client_channel_credentials())
     self._worker_thread.start()
+    if self._is_primary:
+      self._decoding_thread.start()
     self._aio_thread.start()
     if self._is_primary:
       self._keep_warm_thread.start()
@@ -1347,14 +1401,27 @@ class ModelServicesRunner:
           utils.traceprint_all(rpc_tasks, 'After input_to_device')
           return res, unpadded_shape
 
-        self._batcher.register_method(
-            model,
-            MethodKey(method_name, service_id, model_key),
-            method.batch_size,
-            preprocess_fn=_pre_process_inputs,
-            max_live_batches=method.max_live_batches,
-            batching_wait_secs=method.batching_wait_secs,
-        )
+        if method_name != "lm.generate":
+          self._batcher.register_method(
+              model,
+              MethodKey(method_name, service_id, model_key),
+              method.batch_size,
+              preprocess_fn=_pre_process_inputs,
+              max_live_batches=method.max_live_batches,
+              batching_wait_secs=method.batching_wait_secs,
+          )
+        else:
+          # only for continous batching
+          self._batcher.register_method(
+              model,
+              MethodKey(method_name, service_id, model_key),
+              batch_size=1,
+              # batch_size=method.batch_size,
+              preprocess_fn=_pre_process_inputs,
+              # max_live_batches=method.max_live_batches,
+              max_live_batches=16,
+              batching_wait_secs=method.batching_wait_secs,
+          )
 
     self._loaded_models.load(
         model_key,
@@ -1504,10 +1571,324 @@ class ModelServicesRunner:
 
     self._stream_pool.run(_postprocess)
 
+  def _run_decoding_loop_new(self):
+    """Continuous batching prototype. (single model, greedy decoding)"""
+    from jax import numpy as jnp
+
+    # start processing until first batch is ready
+    request = self._batcher.get_decoding_batch()
+    logging.info("First request batch: {}".format(request))
+    utils.traceprint_all(
+        request.rpc_tasks, f'first batch is ready for process'
+    )
+
+    # initialize model
+    model = self._loaded_models.get_model(request.method.model_key)
+    method_obj = model.method(request.method.name)
+
+    # continuous batching parameter setups
+    from saxml.server.pax.lm.servable_lm_common import InputShapeInfo as LMInputShapeInfo
+    
+    assert method_obj._method_hparams.decoder.enable_continuous_batching
+    continuous_batching_batch_size = method_obj._method_hparams.decoder.continuous_batching_batch_size
+    seq_len = method_obj._method_hparams.max_input_seq_len
+    logging.info("Continuous batching set up params: batch_size {}, seq_len {}".format(
+      continuous_batching_batch_size, seq_len))
+
+    requests_in_processing = [None] * continuous_batching_batch_size
+    prefill_input_shape = LMInputShapeInfo(1, seq_len)
+    continuous_batching_input_shape = LMInputShapeInfo(continuous_batching_batch_size, seq_len)
+
+    # initialize decode_state
+    decode_state, decode_cache = method_obj.init_model_state()
+    logging.info("Initial decode state global step: {}".format(decode_state.step))
+    logging.info("Initial decode state per_sample_steps: {}".format(decode_state.per_sample_steps))
+    logging.info("Initial decode state done: {}".format(decode_state.done))
+    
+    # logging.info("Before fetch decode state")
+    # host_decode_state = method_obj.output_to_host(decode_state.done, continuous_batching_batch_size)
+    # logging.info("Finished init_model_state, done_idx: {}".format(
+    #   host_decode_state.done))
+    
+    done_idx = jnp.nonzero(decode_state.done)[0]
+    logging.info("Initial done_idx: {}".format(done_idx))
+
+    # decoding loop
+    step = 0
+    requests_in_decoding = 0
+    first_stop_decoded_steps = 10
+    second_stop_decode_steps = 20
+    while True:
+      try:
+        if len(done_idx) > 0:
+          for _, idx in enumerate(done_idx):
+            # first request
+            if request is not None:
+              next_request = request
+              request = None
+            else:
+              # if all requests finished decoding, block until get next request
+              logging.info("Number of requests in decoding: {}".format(requests_in_decoding))
+              if requests_in_decoding == 0:
+                next_request = self._batcher.get_decoding_batch()
+              elif step in [first_stop_decoded_steps, second_stop_decode_steps]:
+                # simulate continuous batching when first request is decoded by a few steps
+                next_request = self._batcher.get_decoding_batch()
+              else:
+                next_request = self._batcher.get_decoding_batch(block=False)
+            
+            if next_request is None:
+              break  
+            next_request.wait_for_ready()
+            
+            # prefill and insert new request
+            logging.info("Inserting request into slot idx: {}, step: {}".format(idx, step))
+            logging.info("Inserted request: {}".format(next_request))
+            requests_in_processing[idx] = next_request
+            requests_in_decoding += 1
+
+            # logging.info(
+            #   decode_cache['decoder_cache']['lm']['transformer']['x_layers_0']['self_attention']['key_state'].shape)
+            decode_state, decode_cache = method_obj.device_compute_prefill_and_insert(
+              input_batch=next_request.input_tensors,
+              unpadded_shape=prefill_input_shape, # prefill always batch_size=1
+              decode_state=decode_state,
+              decode_cache=decode_cache,
+              slot_idx=idx
+            )
+            logging.info("Updated decode state global step: {}".format(decode_state.step))
+            logging.info("Updated decode state per_sample_steps: {}".format(decode_state.per_sample_steps))
+            logging.info("Updated decode state done: {}".format(decode_state.done))
+            logging.info("Updated decode state segment_pos: {}".format(decode_state.segment_pos))
+            logging.info("Updated decode state decode_lengths: {}".format(decode_state.decode_lengths))
+            logging.info("Updated decode state prefix_lengths: {}".format(decode_state.prefix_lengths))
+            logging.info("Updated decode output_ids: {}".format(decode_state.output_ids))
+
+        decode_state, decode_cache = method_obj.device_compute_decoding_step(
+          unpadded_shape=continuous_batching_input_shape,
+          decode_state=decode_state,
+          decode_cache=decode_cache
+        )
+        done_idx = jnp.nonzero(decode_state.done)[0]
+        logging.info("Loop step: {}, Global step: {}, Done_idx: {}".format(
+          step, decode_state.step, done_idx))
+        step += 1
+
+        # return results of requests which are finished decoding
+        if len(done_idx):
+          streaming_done = None
+          for slot_idx in done_idx:
+            input_batch = requests_in_processing[slot_idx]
+            if input_batch is None:
+              continue
+
+            logging.info("Done decoding, processing result for {}".format(slot_idx))
+            logging.info("Result decode_step: {}".format(decode_state.step))
+            logging.info("Result per_sample_steps: {}".format(decode_state.per_sample_steps))
+            logging.info("Result segment_pos: {}".format(decode_state.segment_pos))
+            logging.info("Result max_prefix_len: {}".format(decode_state.ids.shape[1]))
+            logging.info("Result prefix_paddings: {}".format(decode_state.prefix_paddings))
+            logging.info("Result prefix_ids: {}".format(decode_state.prefix_ids))
+            logging.info("Result prefix_lengths: {}".format(decode_state.prefix_lengths))
+            logging.info("Result decode_lengths: {}".format(decode_state.decode_lengths))
+            logging.info("Result output_ids: {}".format(decode_state.output_ids))
+
+            result = method_obj.device_compute_process_result_with_idx(
+              unpadded_shape=continuous_batching_input_shape,
+              decode_state=decode_state,
+              slot_idx=slot_idx
+            )
+            requests_in_decoding -= 1
+            requests_in_processing[slot_idx] = None
+
+            utils.traceprint_all(
+                input_batch.rpc_tasks, f'After device compute {input_batch.method}'
+            )
+            if result is None:
+              input_batch.finish()
+            else:
+              self._postprocess_async(model, input_batch, result, streaming_done)
+              del result
+      
+      except Exception as e:  # pylint: disable=broad-except
+        self._worker_thread_exception = e
+        break
+
+  def _run_decoding_loop_step(self):
+    """Continuous batching prototype. (single model, greedy decoding)"""
+    from jax import numpy as jnp
+
+    # start processing until first batch is ready
+    batch = self._batcher.get_decoding_batch()
+    batch.wait_for_ready()
+    utils.traceprint_all(
+        batch.rpc_tasks, f'first batch is ready for process'
+    )
+
+    model = self._loaded_models.get_model(batch.method.model_key)
+    method_obj = model.method(batch.method.name)
+    # input_batch_tensors, decode_data, decode_state = method_obj.init_model_state()
+    # logging.info("dummy input batch: {}".format(input_batch_tensors))
+
+    # initialize decode_data and decode_state
+    decode_data = method_obj.device_compute_prefill(
+      input_batch=batch.input_tensors,
+      unpadded_shape=batch.unpadded_shape
+    )
+    decode_state = method_obj.device_compute_init_decode_state(
+      input_batch=batch.input_tensors,
+      unpadded_shape=batch.unpadded_shape,
+      decode_data=decode_data
+    )
+    done_idx = jnp.nonzero(decode_state.done)
+    logging.info("initial done_idx: {}".format(done_idx))
+    logging.info("input_batch: {}".format(batch))
+    logging.info("decode_data: {}".format(decode_data))
+    logging.info("decode_state: {}".format(decode_state))
+
+    # decoding loop
+    step = 0
+    while True:
+      try:
+        if len(done_idx[0]):
+          # get new request
+          batch = self._batcher.get_decoding_batch()
+          batch.wait_for_ready()
+          model = self._loaded_models.get_model(batch.method.model_key)
+          method_obj = model.method(batch.method.name)
+          
+          # insert and prefill
+          decode_data = method_obj.device_compute_prefill(
+            input_batch=batch.input_tensors,
+            unpadded_shape=batch.unpadded_shape
+          )
+          decode_state = method_obj.device_compute_init_decode_state(
+            input_batch=batch.input_tensors,
+            unpadded_shape=batch.unpadded_shape,
+            decode_data=decode_data
+          )
+
+          step = 0
+
+        decode_state = method_obj.device_compute_decoding_step(
+          # input_batch=batch.input_tensors,
+          unpadded_shape=batch.unpadded_shape,
+          decode_state=decode_state
+        )
+        done_idx = jnp.nonzero(decode_state.done)
+        logging.info("step: {}, done_idx: {}".format(step, done_idx))
+        step += 1
+
+        # return results of requests which are finished decoding
+        if len(done_idx[0]):
+          logging.info("Done decoding, processing result for {}".format(done_idx))
+          streaming_done = None
+          result = method_obj.device_compute_process_result(
+            # input_batch=batch.input_tensors,
+            unpadded_shape=batch.unpadded_shape,
+            decode_state=decode_state
+          )
+          utils.traceprint_all(
+              batch.rpc_tasks, f'After device compute {batch.method}'
+          )
+
+          if result is None:
+            batch.finish()
+          else:
+            self._postprocess_async(model, batch, result, streaming_done)
+            del result
+      
+      except Exception as e:  # pylint: disable=broad-except
+        self._worker_thread_exception = e
+        batch.finish()
+        break
+
+  def _run_decoding_loop(self):
+    """Main loop for processing batches."""
+    while True:
+      batch = self._batcher.get_decoding_batch()
+      print("getting decoding batch: {}".format(batch))
+      try:
+        self._inform_secondary_hosts(
+            batch.method.name,
+            batch.method.model_key,
+            str(batch.unpadded_shape),
+            skip_host_sync=batch.skip_host_sync,
+        )
+        model = self._loaded_models.get_model(batch.method.model_key)
+        batch.wait_for_ready()
+        utils.traceprint_all(
+            batch.rpc_tasks, f'Before device compute {batch.method}'
+        )
+        method_obj = model.method(batch.method.name)
+
+        streaming_done = None
+        if batch.input_tensors is None:
+          # Failed preprosessing. Since we have already informed secondary
+          # hosts, we need to compute on tensors.
+          if self._spmd_backend.spmd_host_count() > 1:
+            # JAX dispatches device_compute synchronously to XLA:GPU. Hence
+            # _postprocess_stream_async must start before device_compute,
+            # otherwise device_compute may block the consumption of streaming
+            # queue until it finishes.
+            if method_obj.streamable:
+              streaming_done = utils.Notification()
+              self._postprocess_stream_async(model, batch, streaming_done)
+            result = method_obj.device_compute_with_dummy_data(
+                batch.unpadded_shape
+            )
+          else:
+            result = None
+        else:
+          # import jax
+          # logging.info("Starting JAX trace===================================") 
+          # trace_folder = "/home/jwyang/jax-trace/" 
+          # jax.profiler.start_trace(trace_folder)
+
+          decode_data = method_obj.device_compute_prefill(
+            input_batch=batch.input_tensors,
+            unpadded_shape=batch.unpadded_shape
+          )
+          init_decode_state = method_obj.device_compute_init_decode_state(
+            input_batch=batch.input_tensors,
+            unpadded_shape=batch.unpadded_shape,
+            decode_data=decode_data
+          )
+          decode_state = method_obj.device_compute_decoding_loop(
+            input_batch=batch.input_tensors,
+            unpadded_shape=batch.unpadded_shape,
+            decode_state=init_decode_state
+          )
+          result = method_obj.device_compute_process_result(
+            input_batch=batch.input_tensors,
+            unpadded_shape=batch.unpadded_shape,
+            decode_data=decode_data,
+            decode_state=decode_state
+          )
+
+          # jax.block_until_ready(result) 
+          # jax.profiler.stop_trace() 
+          # logging.info("Finished JAX trace at {}=============================".format(trace_folder))
+        
+        utils.traceprint_all(
+            batch.rpc_tasks, f'After device compute {batch.method}'
+        )
+
+        if result is None:
+          batch.finish()
+        else:
+          self._postprocess_async(model, batch, result, streaming_done)
+          del result
+      except Exception as e:  # pylint: disable=broad-except
+        self._worker_thread_exception = e
+        batch.finish()
+        break
+
   def _run_primary_worker_loop(self):
     """Main loop for processing batches."""
     while True:
       batch = self._batcher.get_batch()
+      # assert batch.method.name != 'lm.generate'
       if batch.method.name == _LOAD_METHOD_KEY:
         with batch:
           assert len(batch.rpc_tasks) == 1
@@ -1692,6 +2073,7 @@ class ModelServicesRunner:
             if method_obj.streamable:
               streaming_done = utils.Notification()
               self._postprocess_stream_async(model, batch, streaming_done)
+
             result = method_obj.device_compute(
                 input_batch=batch.input_tensors,
                 unpadded_shape=batch.unpadded_shape,
