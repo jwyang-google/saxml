@@ -943,10 +943,10 @@ class LMDecodeMethodContinuousBatching(LMDecodeMethod):
     assert self._method_hparams.decoder.enable_continuous_batching
     continuous_batching_batch_size = self._method_hparams.decoder.continuous_batching_batch_size
     input_shape = InputShapeInfo(continuous_batching_batch_size, input_shape_keys[0].seq_len)
-    logging.info("LMDecode method continuous batching size: {}".format(continuous_batching_batch_size))
+    # logging.info("LMDecode method continuous batching size: {}".format(continuous_batching_batch_size))
     
     batch_tensors = self._per_bs_infos[input_shape].dummy_inputs
-    logging.info("dummy input batch: {}".format(batch_tensors))
+    # logging.info("dummy input batch: {}".format(batch_tensors))
     decode_data = self.device_compute_prefill(
       input_batch=batch_tensors,
       unpadded_shape=input_shape,
@@ -964,11 +964,14 @@ class LMDecodeMethodContinuousBatching(LMDecodeMethod):
   ):
     padded_shape = self.get_padded_input_shape(unpadded_shape)
     with self.model_state.global_mesh:
-      logging.info("Calling greedy prefill")
+      # logging.info("Calling greedy prefill")
       decode_data, decode_cache = self._per_bs_infos[padded_shape].device_fn[0](
         self.model_state.mdl_vars, input_batch
       )
       self.model_state.mdl_vars.update(decode_cache)
+      # logging.info("model kv cache vars after prefill: {}".format(
+      #   self.model_state.mdl_vars['decoder_cache']['lm']['transformer']['x_layers_0']['self_attention']['key_state'].shape)
+      # )
       return decode_data
   
   def device_compute_init_decode_state(
@@ -976,13 +979,13 @@ class LMDecodeMethodContinuousBatching(LMDecodeMethod):
   ):
     padded_shape = self.get_padded_input_shape(unpadded_shape)
     with self.model_state.global_mesh:
-      logging.info("Calling greedy init decode state with padded shape: {}".format(padded_shape))
+      # logging.info("Calling greedy init decode state with padded shape: {}".format(padded_shape))
       init_decode_state, decode_cache = self._per_bs_infos[padded_shape].device_fn[1](
         self.model_state.mdl_vars, input_batch, decode_data
       )
-      # logging.info("before greedy init decode state update updated_vars ")
-      # self.model_state.mdl_vars.update(updated_vars)
-      # logging.info("after greedy init decode state update updated_vars")
+      # logging.info("model kv cache vars after init_decode_state: {}".format(
+      #   self.model_state.mdl_vars['decoder_cache']['lm']['transformer']['x_layers_0']['self_attention']['key_state'].shape)
+      # )
     return init_decode_state, decode_cache
 
   def device_compute_prefill_and_insert(
@@ -992,16 +995,18 @@ class LMDecodeMethodContinuousBatching(LMDecodeMethod):
       decode_state,
       decode_cache,
       slot_idx):
-    # Update kv cache in decode_state
-    # decode_state['lm'].update(self.model_state.mdl_vars['decoder_cache']['lm'])
-    logging.info("model kv cache vars after init_model_state: {}".format(
-      self.model_state.mdl_vars['decoder_cache']['lm']['transformer']['x_layers_0']['self_attention']['key_state'].shape)
-    )
+
+    # logging.info("model kv cache vars before prefill_and_insert: {}".format(
+    #   self.model_state.mdl_vars['decoder_cache']['lm']['transformer']['x_layers_0']['self_attention']['key_state'].shape)
+    # )
     self.model_state.mdl_vars.update(decode_cache)
+    # logging.info("model kv cache vars after first update prefill_and_insert: {}".format(
+    #   self.model_state.mdl_vars['decoder_cache']['lm']['transformer']['x_layers_0']['self_attention']['key_state'].shape)
+    # )
 
     padded_shape = self.get_padded_input_shape(unpadded_shape)
     with self.model_state.global_mesh:
-      logging.info("Calling greedy prefill and insert")
+      # logging.info("Calling greedy prefill and insert")
       decode_state, decode_cache = self._per_bs_infos[padded_shape].device_fn[4](
         self.model_state.mdl_vars, 
         input_batch, 
@@ -1010,41 +1015,57 @@ class LMDecodeMethodContinuousBatching(LMDecodeMethod):
         slot_idx
       )
 
-      # Update the model kv cache with inserted request kv cache
-      # self.model_state.mdl_vars['decoder_cache']['lm'].update(decode_state['lm'])
+      # logging.info("model kv cache vars before second update prefill_and_insert: {}".format(
+      #   self.model_state.mdl_vars['decoder_cache']['lm']['transformer']['x_layers_0']['self_attention']['key_state'].shape)
+      # )
+
+      # # self.model_state.mdl_vars.update(decode_cache)
+      # logging.info("model kv cache vars after second update prefill_and_insert: {}".format(
+      #   self.model_state.mdl_vars['decoder_cache']['lm']['transformer']['x_layers_0']['self_attention']['key_state'].shape)
+      # )
       return decode_state, decode_cache
 
   def device_compute_decoding_step(
       self, 
       unpadded_shape: SaxServableModelInputShapeInfo, 
       decode_state,
-      decode_cache
+      decode_cache,
+      align_decode_state
   ):
+    # logging.info("model kv cache vars before decoding_step: {}".format(
+    #   self.model_state.mdl_vars['decoder_cache']['lm']['transformer']['x_layers_0']['self_attention']['key_state'].shape)
+    # )
     self.model_state.mdl_vars.update(decode_cache)
+    # logging.info("model kv cache vars after update decoding_step: {}".format(
+    #   self.model_state.mdl_vars['decoder_cache']['lm']['transformer']['x_layers_0']['self_attention']['key_state'].shape)
+    # )
     padded_shape = self.get_padded_input_shape(unpadded_shape)
     with self.model_state.global_mesh:
-      logging.info("Calling greedy decoding step")
+      # logging.info("Calling greedy decoding step")
       decode_state, decode_cache = self._per_bs_infos[padded_shape].device_fn[2](
         self.model_state.mdl_vars, 
-        decode_state
+        decode_state,
+        # decode_cache,
+        align_decode_state
       )
-      # self.model_state.mdl_vars.update(updated_vars)
-      # logging.info("Decode cache step: {}".format(self.model_state.mdl_vars['decoder_cache']['lm']['time_step']))
+      # logging.info("model kv cache vars after running decoding_step: {}".format(
+      #   self.model_state.mdl_vars['decoder_cache']['lm']['transformer']['x_layers_0']['self_attention']['key_state'].shape)
+      # )
+      # jax.block_until_ready(decode_state)
     return decode_state, decode_cache
 
   def device_compute_decoding_loop(
-      self, input_batch: DeviceTensors, unpadded_shape: SaxServableModelInputShapeInfo, decode_state
-  ):
+      self, input_batch: DeviceTensors, unpadded_shape: SaxServableModelInputShapeInfo, decode_state):
     padded_shape = self.get_padded_input_shape(unpadded_shape)
     with self.model_state.global_mesh:
-      logging.info("Calling greedy decoding loop")
+      # logging.info("Calling greedy decoding loop")
       for i in range(64):
         decode_state, updated_vars = self._per_bs_infos[padded_shape].device_fn[2](
           self.model_state.mdl_vars, input_batch, decode_state
         )
-        logging.info("updated_vars in {} iteration: {}".format(
-          i, 
-          updated_vars['decoder_cache']['lm']['transformer']['x_layers_0']['self_attention']['key_state'].shape))
+        # logging.info("updated_vars in {} iteration: {}".format(
+        #   i, 
+        #   updated_vars['decoder_cache']['lm']['transformer']['x_layers_0']['self_attention']['key_state'].shape))
         self.model_state.mdl_vars.update(updated_vars)
     return decode_state
   
@@ -1052,11 +1073,10 @@ class LMDecodeMethodContinuousBatching(LMDecodeMethod):
       self, 
       # input_batch: DeviceTensors, 
       unpadded_shape: SaxServableModelInputShapeInfo, 
-      decode_state
-  ):
+      decode_state):
     padded_shape = self.get_padded_input_shape(unpadded_shape)
     with self.model_state.global_mesh:
-      logging.info("Calling greedy process result")
+      # logging.info("Calling greedy process result")
       output_batch = self._per_bs_infos[padded_shape].device_fn[3](
         self.model_state.mdl_vars, 
         # input_batch, 
@@ -1072,7 +1092,7 @@ class LMDecodeMethodContinuousBatching(LMDecodeMethod):
   ):
     padded_shape = self.get_padded_input_shape(unpadded_shape)
     with self.model_state.global_mesh:
-      logging.info("Calling greedy process result with idx".format(slot_idx))
+      # logging.info("Calling greedy process result with idx".format(slot_idx))
       output_batch = self._per_bs_infos[padded_shape].device_fn[5](
         self.model_state.mdl_vars, 
         decode_state,
@@ -1082,11 +1102,11 @@ class LMDecodeMethodContinuousBatching(LMDecodeMethod):
 
   def device_compute(
       self, input_batch: DeviceTensors, unpadded_shape: SaxServableModelInputShapeInfo
-  ) -> DeviceTensors:
+      ) -> DeviceTensors:
     """Executes the device computation."""
     padded_shape = self.get_padded_input_shape(unpadded_shape)
     with self.model_state.global_mesh:
-      logging.info("Call continuous batching decode device fn")
+      # logging.info("Call continuous batching decode device fn")
       # output_batch = self._per_bs_infos[padded_shape].device_fn[0](
       #     self.model_state.mdl_vars, input_batch
       # )
@@ -1094,13 +1114,13 @@ class LMDecodeMethodContinuousBatching(LMDecodeMethod):
         self.model_state.mdl_vars, input_batch
       )
       # self.model_state.mdl_vars.update(updated_vars)
-      logging.info("after calling greedy prefill")
+      # logging.info("after calling greedy prefill")
 
       init_decode_state, updated_vars = self._per_bs_infos[padded_shape].device_fn[1](
         self.model_state.mdl_vars, input_batch, decode_data
       )
       self.model_state.mdl_vars.update(updated_vars)
-      logging.info("after calling greedy init decode state")
+      # logging.info("after calling greedy init decode state")
 
       decode_state = init_decode_state
       for i in range(64):
@@ -1109,18 +1129,18 @@ class LMDecodeMethodContinuousBatching(LMDecodeMethod):
           # input_batch, 
           decode_state
         )
-        logging.info("updated_vars in {} iteration: {}".format(
-          i, 
-          updated_vars['decoder_cache']['lm']['transformer']['x_layers_0']['self_attention']['key_state'].shape))
+        # logging.info("updated_vars in {} iteration: {}".format(
+        #   i, 
+        #   updated_vars['decoder_cache']['lm']['transformer']['x_layers_0']['self_attention']['key_state'].shape))
         self.model_state.mdl_vars.update(updated_vars)
-      logging.info("after calling greedy decoding loop")
+      # logging.info("after calling greedy decoding loop")
 
       output_batch = self._per_bs_infos[padded_shape].device_fn[3](
         self.model_state.mdl_vars, 
         # input_batch, 
         decode_state
       )
-      logging.info("after calling greedy process result, output_batch: {}".format(output_batch))
+      # logging.info("after calling greedy process result, output_batch: {}".format(output_batch))
       return output_batch
 
 
@@ -1221,8 +1241,8 @@ class LMDecodeMethodContinuousBatching(LMDecodeMethod):
         lambda x: jax.core.ShapedArray((num_cores,) + x.shape, x.dtype),
         host_dummy,
     )
-    logging.info("global_inputs_shape_dtype: {}".format(global_inputs_shape_dtype[1]))
-    logging.info("input_shape: {}, batched_host_dummy: {}".format(input_shape, batched_host_dummy))
+    # logging.info("global_inputs_shape_dtype: {}".format(global_inputs_shape_dtype[1]))
+    # logging.info("input_shape: {}, batched_host_dummy: {}".format(input_shape, batched_host_dummy))
 
     self._per_bs_infos[input_shape] = MethodInputInfo(
         input_pspecs=input_pspecs,
@@ -1234,7 +1254,7 @@ class LMDecodeMethodContinuousBatching(LMDecodeMethod):
     info.dummy_inputs_per_device_buffers = self._input_to_device_buffers(
         batched_host_dummy, input_shape, is_dummy=True
     )
-    logging.info("Finished calling input_to_device_buffers: {}".format(input_shape))
+    # logging.info("Finished calling input_to_device_buffers: {}".format(input_shape))
     info.dummy_inputs = self._device_buffers_to_jax_arrays(
         info.dummy_inputs_per_device_buffers, input_shape
     )
@@ -1280,39 +1300,6 @@ class LMDecodeMethodContinuousBatching(LMDecodeMethod):
           inputs_shape_dtype=global_inputs_shaped_arrays,
           compiler_options=self._compiler_options,
       )
-
-      if self._enable_auto_sharding:
-        input_shardings = device_fn.input_shardings[0]
-        self._prng_key, _ = jax.random.split(self._prng_key)
-        input_pspecs = jax.tree_util.tree_map(
-            lambda x: x.spec, input_shardings[1]
-        )
-        mdl_var_pspecs = input_shardings[0]
-
-        # Reshard model vars based on shardings inferred by the
-        # auto-sharding pass. In PAX, we create model vars and
-        # initialize them based on the shardings inferred. In SAX, we
-        # need to re-shard them as they are created before we run
-        # auto-sharding (say when the model is loaded from a
-        # checkpoint).
-        resharded_mdl_vars = jax.device_put(
-            self.model_state.mdl_vars, mdl_var_pspecs
-        )
-        # Update the model state (self._model_state) with the resharded
-        # model vars and their shardings. Note that self.model_state is
-        # a getter for the underlying self._model_state field (see
-        # below).
-        self._model_state = ServableModelState(
-            resharded_mdl_vars,
-            self.model_state.mdl_var_unpadded_shapes,
-            self.model_state.is_primary_host,
-            self.model_state.primary_process_id,
-            self.model_state.input_prefetch,
-            self.model_state.precompile,
-            self.model_state.step,
-            self.model_state.global_mesh,
-            mdl_var_pspecs,
-        )
 
     info.device_fn = [greedy_prefill_device_fn, greedy_init_decode_state_device_fn, 
                       greedy_decode_step_device_fn, greedy_process_result_device_fn,
@@ -1444,7 +1431,7 @@ class LMDecodeMethodContinuousBatching(LMDecodeMethod):
           mdl_vars, [k1, k2])  # pytype: disable=wrong-arg-types  # jax-ndarray
         return outputs
       decode_state, decode_cache = _model_fn(batched_inputs)
-      logging.info("prefill and insert return decode cache: {}".format(decode_cache))
+      # logging.info("prefill and insert return decode cache: {}".format(decode_cache))
       # if base_layer.DECODE_CACHE in updated_vars:
       #   del updated_vars[base_layer.DECODE_CACHE]
       # if base_layer.PREFIX_DECODE_CACHE in decode_cache:
@@ -1672,11 +1659,11 @@ class LMDecodeMethodContinuousBatching(LMDecodeMethod):
             jnp.sum(x, axis=0, promote_integers=False), None
         )
 
-      logging.info("before calling init decode state replicate")
+      # logging.info("before calling init decode state replicate")
       inputs = jax.tree_util.tree_map(_replicate, inputs)
       step, batched_inputs, non_batched_inputs = inputs
       prng_key = jax.random.fold_in(self._prng_key, step)
-      logging.info("before calling init decode state jax func")
+      # logging.info("before calling init decode state jax func")
       outputs = jax_func(
           mdl_vars, prng_key, batched_inputs, non_batched_inputs, decode_data
       )
@@ -1735,7 +1722,7 @@ class LMDecodeMethodContinuousBatching(LMDecodeMethod):
         return outputs
 
       if isinstance(non_batched_inputs, tuple) and not non_batched_inputs:
-        logging.info("before calling init decode state model_fn")
+        # logging.info("before calling init decode state model_fn")
         outputs = _model_fn(batched_inputs)
       else:
 
@@ -1782,7 +1769,7 @@ class LMDecodeMethodContinuousBatching(LMDecodeMethod):
       kwargs['callback_device_index'] = self.callback_device_index
 
     # initialize decoding state
-    logging.info("before calling init decode state apply func")
+    # logging.info("before calling init decode state apply func")
     init_decode_state, updated_vars = self._model.apply(
         mdl_vars,
         input_batch=inputs,
@@ -1806,112 +1793,91 @@ class LMDecodeMethodContinuousBatching(LMDecodeMethod):
   # greedy decode single step pjit functions
   def _pjit_device_fn_greedy_decode_step(
       self, jax_func, input_pspecs: PSpecs, batch_size: int
-  ) -> Callable[[DeviceTensors, DeviceTensors], DeviceTensors]:
+  ) -> Callable[[DeviceTensors, DeviceTensors, bool], DeviceTensors]:
     """Returns a pjit-ed model function with input handling."""
 
-    def _wrapped_fn_greedy_decode_step(mdl_vars, decode_state):
+    def _wrapped_fn_greedy_decode_step(mdl_vars, decode_state, align_decode_state):
       # Remove padding on the vars.
       # mdl_vars = jax.tree_util.tree_map(
       #     remove_padding, mdl_vars, self.model_state.mdl_var_unpadded_shapes
       # )
-      mdl_vars = jax.tree_util.tree_map(
-          jax.lax.with_sharding_constraint,
-          mdl_vars,
-          self.model_state.mdl_var_pspecs,
-      )
+      # mdl_vars = jax.tree_util.tree_map(
+      #     jax.lax.with_sharding_constraint,
+      #     mdl_vars,
+      #     self.model_state.mdl_var_pspecs,
+      # )
 
       # Only one core has real data, others have zeros. Summing on the
       # leading `cores` dimension can make data replicated.
-      def _replicate(x):
-        return jax.lax.with_sharding_constraint(
-            jnp.sum(x, axis=0, promote_integers=False), None
-        )
+      # def _replicate(x):
+      #   return jax.lax.with_sharding_constraint(
+      #       jnp.sum(x, axis=0, promote_integers=False), None
+      #   )
 
       # inputs = jax.tree_util.tree_map(_replicate, inputs)
       # step, batched_inputs, non_batched_inputs = inputs
       # prng_key = jax.random.fold_in(self._prng_key, step)
       prng_key = self._prng_key
       outputs = jax_func(
-          mdl_vars, prng_key, decode_state
+          mdl_vars, prng_key, decode_state, 
+          # decode_cache,
+          align_decode_state
       )
-      # This assumes that outputs are generated after previous host calls, and
-      # it is guaranteed by data dependency.
-      if self.streamable:
-
-        def _mark_done(dummy, _):
-          del dummy
-          self.mark_stream_output_done()
-
-        hcb.id_tap(_mark_done, outputs, device_index=self.callback_device_index)
-        # Unused final outputs. Return something to make output_to_host
-        # blocking.
-        return jnp.zeros((batch_size,), dtype=jnp.int32)
 
       return outputs
 
     # pjit-ed function.
     self.model_state.mdl_var_pspecs.update(self.decode_cache_pspecs)
-    if self._enable_auto_sharding:
-      return pjit.pjit(
-          _wrapped_fn_greedy_decode_step,
-          in_shardings=(pjit.AUTO(self.model_state.global_mesh), None),
-          out_shardings=None,
-      )
-    else:
-      return pjit.pjit(
-          _wrapped_fn_greedy_decode_step,
-          in_shardings=(self.model_state.mdl_var_pspecs, None),
-          out_shardings=(None, self.decode_cache_pspecs),
-      )
+    return pjit.pjit(
+        _wrapped_fn_greedy_decode_step,
+        in_shardings=(self.model_state.mdl_var_pspecs, None),
+        out_shardings=(None, self.decode_cache_pspecs),
+        static_argnums=2
+        # out_shardings=None,
+    )
 
   def greedy_decode_step_jax_func(
       self,
       mdl_vars: NestedJTensor,
       prng_key: PRNGKey,
-      # batched_inputs: NestedJTensor,
-      # non_batched_inputs: NestedJTensor,
-      decode_state: NestedJTensor
+      decode_state: NestedJTensor,
+      # decode_cache: NestedJTensor,
+      align_decode_state
   ) -> NestedJTensor:
-    if self._model.fprop_dtype == jnp.bfloat16:
-      # Convert float inputs/vars if fprop dtype is bfloat16.
-      # batched_inputs, mdl_vars = jax.tree_map(
-      #     (lambda x: x.astype(jnp.bfloat16) if x.dtype == jnp.float32 else x),
-      #     (batched_inputs, mdl_vars),
-      # )
-      mdl_vars = jax.tree_map(
-          (lambda x: x.astype(jnp.bfloat16) if x.dtype == jnp.float32 else x),
-          (mdl_vars),
-      )
+    # if self._model.fprop_dtype == jnp.bfloat16:
+    #   # Convert float inputs/vars if fprop dtype is bfloat16.
+    #   # batched_inputs, mdl_vars = jax.tree_map(
+    #   #     (lambda x: x.astype(jnp.bfloat16) if x.dtype == jnp.float32 else x),
+    #   #     (batched_inputs, mdl_vars),
+    #   # )
+    #   mdl_vars = jax.tree_map(
+    #       (lambda x: x.astype(jnp.bfloat16) if x.dtype == jnp.float32 else x),
+    #       (mdl_vars),
+    #   )
 
     context_p = base_layer.JaxContext.HParams(do_eval=True)
     k1, k2 = jax.random.split(prng_key)
     with base_layer.JaxContext.new_context(hparams=context_p):
       def _model_fn(decode_state):
         outputs = self.call_model_function_greedy_decode_step(
-          decode_state, mdl_vars, [k1, k2])  # pytype: disable=wrong-arg-types  # jax-ndarray
+          decode_state, 
+          # decode_cache, 
+          align_decode_state,
+          mdl_vars, [k1, k2])  # pytype: disable=wrong-arg-types  # jax-ndarray
         return outputs
 
       outputs = _model_fn(decode_state)
-
+      # _model_fn(decode_state)
     return outputs
 
-  def call_model_function_greedy_decode_step(self, decode_state, mdl_vars, prng_key):
+  def call_model_function_greedy_decode_step(
+    self, decode_state, 
+    # decode_cache, 
+    align_decode_state,
+    mdl_vars, prng_key):
     k1, k2 = prng_key
 
     kwargs = {}
-    if self.streamable:
-
-      def callback_fn(x, _):
-        assert self.model_state.is_primary_host
-        self.enqueue_stream_output(x)
-
-      kwargs['result_callback'] = decoder_utils.StreamingResultCallback(
-          functools.partial(
-              hcb.id_tap, callback_fn, device_index=self.callback_device_index
-          ),
-          interval_steps=self._method_hparams.stream_interval_steps,
-      )
-
     if (
         'callback_device_index'
         in inspect.signature(self._model.decode_with_params).parameters
@@ -1919,9 +1885,11 @@ class LMDecodeMethodContinuousBatching(LMDecodeMethod):
       kwargs['callback_device_index'] = self.callback_device_index
 
     # decode single step
-    decode_state, updated_vars = self._model.apply(
+    decode_state, decode_cache = self._model.apply(
         mdl_vars,
         decode_state=decode_state,
+        # decode_cache=decode_cache,
+        align_decode_state=align_decode_state,
         method=self._model.greedy_decode_step,
         mutable=[
             base_layer.NON_TRAINABLE,
@@ -1935,7 +1903,7 @@ class LMDecodeMethodContinuousBatching(LMDecodeMethod):
         decoder_params=self._method_hparams.decoder,
         **kwargs,
     )
-    return decode_state, updated_vars
+    return decode_state, decode_cache
 
 
   # greedy decode pjit functions
@@ -2289,6 +2257,8 @@ class LMDecodeMethodContinuousBatching(LMDecodeMethod):
     )
     return outputs  
 
+
+  # original batch decoding
   def call_model_function(self, inputs, mdl_vars, prng_key):
     k1, k2 = prng_key
 

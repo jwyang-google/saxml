@@ -385,7 +385,7 @@ class ServableMethod(servable_model.ServableMethod):
     )
     full_b = global_shape[1]
     if b != full_b:
-      logging.info("b:{}, full_b: {}, global_shape: {}".format(b, full_b, global_shape))
+      # logging.info("b:{}, full_b: {}, global_shape: {}".format(b, full_b, global_shape))
       assert b < full_b
       x = np.concatenate([x, np.repeat(x[:1], full_b - b, 0)], axis=0)
     return x

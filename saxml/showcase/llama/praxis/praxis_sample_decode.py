@@ -2934,10 +2934,10 @@ def greedy_process_result_with_idx(
         left_align_max_prefix_len - decode_state.step - 1 + decode_state.decode_lengths[slot_idx], 
         dtype=jnp.int32), 
       axis=0)
-    logging.info("process result left_align_max_prefix_len: {}, left_align_prefix_lens: {}, step: {}, per_sample_steps: {}".format(
-      left_align_max_prefix_len, 
-      left_align_prefix_lens,
-      decode_state.step, decode_state.per_sample_steps))
+    # logging.info("process result left_align_max_prefix_len: {}, left_align_prefix_lens: {}, step: {}, per_sample_steps: {}".format(
+    #   left_align_max_prefix_len, 
+    #   left_align_prefix_lens,
+    #   decode_state.step, decode_state.per_sample_steps))
 
     result.output_ids = decoder_utils.left_align_tensor(
         result.output_ids, left_align_prefix_lens, left_align_max_prefix_len

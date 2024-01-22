@@ -27,6 +27,7 @@ import traceback
 import typing
 from typing import Any, Awaitable, Callable, Deque, Dict, List, Mapping, Optional, Sequence, Tuple, Type
 import uuid
+import numpy as np
 
 from absl import logging
 import grpc
@@ -1419,7 +1420,7 @@ class ModelServicesRunner:
               # batch_size=method.batch_size,
               preprocess_fn=_pre_process_inputs,
               # max_live_batches=method.max_live_batches,
-              max_live_batches=16,
+              max_live_batches=64,
               batching_wait_secs=method.batching_wait_secs,
           )
 
@@ -1601,97 +1602,131 @@ class ModelServicesRunner:
 
     # initialize decode_state
     decode_state, decode_cache = method_obj.init_model_state()
-    logging.info("Initial decode state global step: {}".format(decode_state.step))
-    logging.info("Initial decode state per_sample_steps: {}".format(decode_state.per_sample_steps))
-    logging.info("Initial decode state done: {}".format(decode_state.done))
-    
-    # logging.info("Before fetch decode state")
-    # host_decode_state = method_obj.output_to_host(decode_state.done, continuous_batching_batch_size)
-    # logging.info("Finished init_model_state, done_idx: {}".format(
-    #   host_decode_state.done))
+    logging.info("decode state devices: {}".format(decode_state.done.devices()))
+    # logging.info("Initial decode state global step: {}".format(decode_state.step))
+    # logging.info("Initial decode state per_sample_steps: {}".format(decode_state.per_sample_steps))
+    # logging.info("Initial decode state done: {}".format(decode_state.done))
     
     done_idx = jnp.nonzero(decode_state.done)[0]
-    logging.info("Initial done_idx: {}".format(done_idx))
+    # logging.info("Initial done_idx: {}".format(done_idx))
 
     # decoding loop
     step = 0
     requests_in_decoding = 0
-    first_stop_decoded_steps = 10
-    second_stop_decode_steps = 20
+    # first_stop_decoded_steps = 10
+    # second_stop_decode_steps = 20
+
+    insert_times = []
+    decode_step_times = []
+    fetch_state_times = []
+    process_result_times = []
+
+    check_state = True
     while True:
       try:
-        if len(done_idx) > 0:
-          for _, idx in enumerate(done_idx):
-            # first request
-            if request is not None:
-              next_request = request
-              request = None
-            else:
-              # if all requests finished decoding, block until get next request
-              logging.info("Number of requests in decoding: {}".format(requests_in_decoding))
-              if requests_in_decoding == 0:
-                next_request = self._batcher.get_decoding_batch()
-              elif step in [first_stop_decoded_steps, second_stop_decode_steps]:
-                # simulate continuous batching when first request is decoded by a few steps
-                next_request = self._batcher.get_decoding_batch()
+        # insert request
+        start_insert_time = time.time()
+        if check_state:
+          # check_state = False
+          if len(done_idx) > 0:
+            for _, idx in enumerate(done_idx):
+              # first request
+              if request is not None:
+                next_request = request
+                request = None
               else:
-                next_request = self._batcher.get_decoding_batch(block=False)
-            
-            if next_request is None:
-              break  
-            next_request.wait_for_ready()
-            
-            # prefill and insert new request
-            logging.info("Inserting request into slot idx: {}, step: {}".format(idx, step))
-            logging.info("Inserted request: {}".format(next_request))
-            requests_in_processing[idx] = next_request
-            requests_in_decoding += 1
+                # if all requests finished decoding, block until get next request
+                logging.info("Number of requests in decoding: {}".format(requests_in_decoding))
+                if requests_in_decoding == 0:
+                  next_request = self._batcher.get_decoding_batch()
+                # elif step in [first_stop_decoded_steps, second_stop_decode_steps]:
+                #   # simulate continuous batching when first request is decoded by a few steps
+                #   next_request = self._batcher.get_decoding_batch()
+                else:
+                  next_request = self._batcher.get_decoding_batch(block=False)
+              
+              if next_request is None:
+                break  
+              next_request.wait_for_ready()
+              
+              # prefill and insert new request
+              logging.info("Inserting request into slot idx: {}, step: {}".format(idx, step))
+              # logging.info("Inserted request: {}".format(next_request))
+              requests_in_processing[idx] = next_request
+              requests_in_decoding += 1
 
-            # logging.info(
-            #   decode_cache['decoder_cache']['lm']['transformer']['x_layers_0']['self_attention']['key_state'].shape)
-            decode_state, decode_cache = method_obj.device_compute_prefill_and_insert(
-              input_batch=next_request.input_tensors,
-              unpadded_shape=prefill_input_shape, # prefill always batch_size=1
-              decode_state=decode_state,
-              decode_cache=decode_cache,
-              slot_idx=idx
-            )
-            logging.info("Updated decode state global step: {}".format(decode_state.step))
-            logging.info("Updated decode state per_sample_steps: {}".format(decode_state.per_sample_steps))
-            logging.info("Updated decode state done: {}".format(decode_state.done))
-            logging.info("Updated decode state segment_pos: {}".format(decode_state.segment_pos))
-            logging.info("Updated decode state decode_lengths: {}".format(decode_state.decode_lengths))
-            logging.info("Updated decode state prefix_lengths: {}".format(decode_state.prefix_lengths))
-            logging.info("Updated decode output_ids: {}".format(decode_state.output_ids))
+              decode_state, decode_cache = method_obj.device_compute_prefill_and_insert(
+                input_batch=next_request.input_tensors,
+                unpadded_shape=prefill_input_shape, # prefill always batch_size=1
+                decode_state=decode_state,
+                decode_cache=decode_cache,
+                slot_idx=idx
+              )
+              # logging.info("Updated decode state global step: {}".format(decode_state.step))
+              # logging.info("Updated decode state per_sample_steps: {}".format(decode_state.per_sample_steps))
+              # logging.info("Updated decode state done: {}".format(decode_state.done))
+              # logging.info("Updated decode state segment_pos: {}".format(decode_state.segment_pos))
+              # logging.info("Updated decode state decode_lengths: {}".format(decode_state.decode_lengths))
+              # logging.info("Updated decode state prefix_lengths: {}".format(decode_state.prefix_lengths))
+              # logging.info("Updated decode output_ids: {}".format(decode_state.output_ids))
+        end_insert_time = time.time()
+        insert_time_ms = 1000 * (end_insert_time - start_insert_time)
+        if step > 1000:
+          insert_times.append(insert_time_ms)
+        logging.info("insert_time: {:.4f}".format(insert_time_ms))
 
+        # decoding step
+        start_step_time = time.time()
+        global_step = decode_state.step
+        logging.info("decode_state step: {}".format(global_step))
+        align_decode_state = False
+        if jnp.equal(global_step, 2047):
+          align_decode_state = True
+        logging.info("align_decode_state: {}".format(align_decode_state))
         decode_state, decode_cache = method_obj.device_compute_decoding_step(
+        # method_obj.device_compute_decoding_step(
           unpadded_shape=continuous_batching_input_shape,
           decode_state=decode_state,
-          decode_cache=decode_cache
+          decode_cache=decode_cache,
+          align_decode_state=align_decode_state
         )
-        done_idx = jnp.nonzero(decode_state.done)[0]
-        logging.info("Loop step: {}, Global step: {}, Done_idx: {}".format(
-          step, decode_state.step, done_idx))
-        step += 1
+        end_step_time = time.time()
+        decode_step_time_ms = 1000 * (end_step_time - start_step_time)
+        if step > 1000:
+          decode_step_times.append(decode_step_time_ms)
+        logging.info("decode_step_time: {:.4f}".format(decode_step_time_ms))
 
-        # return results of requests which are finished decoding
-        if len(done_idx):
+        # fetch decode state
+        # if step % 30 == 0:
+        # check_state = True
+        start_fetch_state_time = time.time()
+        done_idx = jnp.nonzero(decode_state.done)[0]
+        end_fetch_state_time = time.time()
+        fetch_state_time_ms = 1000 * (end_fetch_state_time - start_fetch_state_time)
+        if step > 1000:
+          fetch_state_times.append(fetch_state_time_ms)
+        logging.info("fetch_state_time: {:.4f}".format(fetch_state_time_ms))
+
+
+        # process results
+        start_process_result_time = time.time()
+        if check_state and len(done_idx):
           streaming_done = None
           for slot_idx in done_idx:
             input_batch = requests_in_processing[slot_idx]
             if input_batch is None:
               continue
 
-            logging.info("Done decoding, processing result for {}".format(slot_idx))
-            logging.info("Result decode_step: {}".format(decode_state.step))
-            logging.info("Result per_sample_steps: {}".format(decode_state.per_sample_steps))
-            logging.info("Result segment_pos: {}".format(decode_state.segment_pos))
-            logging.info("Result max_prefix_len: {}".format(decode_state.ids.shape[1]))
-            logging.info("Result prefix_paddings: {}".format(decode_state.prefix_paddings))
-            logging.info("Result prefix_ids: {}".format(decode_state.prefix_ids))
-            logging.info("Result prefix_lengths: {}".format(decode_state.prefix_lengths))
-            logging.info("Result decode_lengths: {}".format(decode_state.decode_lengths))
-            logging.info("Result output_ids: {}".format(decode_state.output_ids))
+            # logging.info("Done decoding, processing result for {}".format(slot_idx))
+            # logging.info("Result decode_step: {}".format(decode_state.step))
+            # logging.info("Result per_sample_steps: {}".format(decode_state.per_sample_steps))
+            # logging.info("Result segment_pos: {}".format(decode_state.segment_pos))
+            # logging.info("Result max_prefix_len: {}".format(decode_state.ids.shape[1]))
+            # logging.info("Result prefix_paddings: {}".format(decode_state.prefix_paddings))
+            # logging.info("Result prefix_ids: {}".format(decode_state.prefix_ids))
+            # logging.info("Result prefix_lengths: {}".format(decode_state.prefix_lengths))
+            # logging.info("Result decode_lengths: {}".format(decode_state.decode_lengths))
+            # logging.info("Result output_ids: {}".format(decode_state.output_ids))
 
             result = method_obj.device_compute_process_result_with_idx(
               unpadded_shape=continuous_batching_input_shape,
@@ -1701,15 +1736,31 @@ class ModelServicesRunner:
             requests_in_decoding -= 1
             requests_in_processing[slot_idx] = None
 
-            utils.traceprint_all(
-                input_batch.rpc_tasks, f'After device compute {input_batch.method}'
-            )
+            # utils.traceprint_all(
+            #     input_batch.rpc_tasks, f'After device compute {input_batch.method}'
+            # )
             if result is None:
               input_batch.finish()
             else:
               self._postprocess_async(model, input_batch, result, streaming_done)
               del result
+        end_process_result_time = time.time()
+        process_result_time_ms = 1000 * (end_process_result_time - start_process_result_time)
+        if step > 1000:
+          process_result_times.append(process_result_time_ms)
+        logging.info("process_result_time: {:.4f}".format(process_result_time_ms))
+
+        if len(decode_step_times) > 0 and len(decode_step_times) % 1000 == 0:
+          avg_insert_time = np.average(insert_times)
+          avg_decode_step_time = np.average(decode_step_times)
+          avg_fetch_state_time = np.average(fetch_state_times)
+          avg_process_result_time = np.average(process_result_times)
+          logging.info("step: {}, avg_insert_time: {:.4f}, avg_decode_step_time: {:.4f}, avg_fetch_state_time: {:.4f}, avg_process_result_time: {:.4f}".format(
+            step, avg_insert_time, avg_decode_step_time, avg_fetch_state_time, avg_process_result_time
+          ))
       
+        logging.info("Loop step: {}".format(step))
+        step += 1
       except Exception as e:  # pylint: disable=broad-except
         self._worker_thread_exception = e
         break

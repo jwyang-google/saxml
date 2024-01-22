@@ -1634,7 +1634,7 @@ class LanguageModelContinuousBatching(base_model.BaseModel):
       )
 
     fprop_fn(self.lm, decode_data.input_ids, decode_data.input_paddings)
-    logging.info("greedy prefill decode cache: {}".format(self.variables[base_layer.DECODE_CACHE]))
+    # logging.info("greedy prefill decode cache: {}".format(self.variables[base_layer.DECODE_CACHE]))
     return decode_data
 
   def greedy_prefill_and_insert(
@@ -1647,27 +1647,27 @@ class LanguageModelContinuousBatching(base_model.BaseModel):
     decode_cache = jax.tree_map(jnp.copy, self.variables[base_layer.DECODE_CACHE])
 
     # print input tensor shapes
-    logging.info("decoder_hparams: {}".format(decoder_hparams))
-    logging.info("input batch: {}".format(input_batch))
-    logging.info("decode state: {}".format(decode_state))
-    logging.info("decode cache: {}".format(decode_cache))
+    # logging.info("decoder_hparams: {}".format(decoder_hparams))
+    # logging.info("input batch: {}".format(input_batch))
+    # logging.info("decode state: {}".format(decode_state))
+    # logging.info("decode cache: {}".format(decode_cache))
 
     # prefill
     prefill_decode_data = self.greedy_prefill(input_batch, decoder_params)
     prefill_decode_state = self.greedy_init_decode_state(
       input_batch, prefill_decode_data, decoder_params)
-    logging.info("prefill decode data: {}".format(prefill_decode_data))
-    logging.info("prefill decode state: {}".format(prefill_decode_state))
+    # logging.info("prefill decode data: {}".format(prefill_decode_data))
+    # logging.info("prefill decode state: {}".format(prefill_decode_state))
 
     # update decode_state
     decode_state.per_sample_steps = decode_state.per_sample_steps.at[slot_idx].set(
       prefill_decode_state.per_sample_steps[0])
     decode_state.segment_pos = decode_state.segment_pos.at[slot_idx].set(
       prefill_decode_state.segment_pos[0])
-    logging.info("updated per_sample_steps, segment_pos")
+    # logging.info("updated per_sample_steps, segment_pos")
 
     # right aligned output_ids, logprobs in decode_state
-    logging.info("right aligned output_ids, logprobs")
+    # logging.info("right aligned output_ids, logprobs")
     max_prefix_len = decode_state.max_prefix_len
     global_step = jnp.expand_dims(jnp.array(decode_state.step, dtype=jnp.int32), axis=0)
     right_aligned_length = prefill_decode_state.output_ids.shape[1] - (global_step - max_prefix_len + 1)
@@ -1695,15 +1695,15 @@ class LanguageModelContinuousBatching(base_model.BaseModel):
       # logging.info("key_state in decode_state: {}".format(decode_state_kv_cache['key_state']))
       # logging.info("key_state in variables: {}".format(new_key_cache))
       
-      logging.info("Update right aligned key cache in layer {}".format(i))
+      # logging.info("Update right aligned key cache in layer {}".format(i))
       decode_state_kv_cache['key_state'] = decode_state_kv_cache['key_state'].at[slot_idx].set(
           decoder_utils.right_align_tensors(new_key_cache, right_aligned_length)[0])
 
-      logging.info("Update right aligned value cache in layer {}".format(i))
+      # logging.info("Update right aligned value cache in layer {}".format(i))
       decode_state_kv_cache['value_state'] = decode_state_kv_cache['value_state'].at[slot_idx].set(
           decoder_utils.right_align_tensors(new_value_cache, right_aligned_length)[0])
 
-      logging.info("Update right aligned pos_emb cache in layer {}".format(i))
+      # logging.info("Update right aligned pos_emb cache in layer {}".format(i))
       decode_state_kv_cache['key_post_rotary_pos_emb'] = \
         decode_state_kv_cache['key_post_rotary_pos_emb'].at[slot_idx].set(
           decoder_utils.right_align_tensors(new_pos_emb, right_aligned_length)[0])
@@ -1737,9 +1737,9 @@ class LanguageModelContinuousBatching(base_model.BaseModel):
     decode_state.weights = decode_state.weights.at[slot_idx].set(
       prefill_decode_state.weights[0])
 
-    logging.info("Update decode cache: {}".format(decode_cache))
+    # logging.info("Update decode cache: {}".format(decode_cache))
     self.variables[base_layer.DECODE_CACHE].update(decode_cache)
-    logging.info("After update decode cache: {}".format(self.variables[base_layer.DECODE_CACHE]))
+    # logging.info("After update decode cache: {}".format(self.variables[base_layer.DECODE_CACHE]))
     return decode_state #, decode_cache
   
   def greedy_init_decode_state(
@@ -1748,15 +1748,15 @@ class LanguageModelContinuousBatching(base_model.BaseModel):
       decode_data: NestedMap,
       decoder_params: DecoderHParams
   ):
-    logging.info("init decode state input batch: {}".format(input_batch))
-    logging.info("init decode state decode data: {}".format(decode_data))
+    # logging.info("init decode state input batch: {}".format(input_batch))
+    # logging.info("init decode state decode data: {}".format(decode_data))
     if decoder_params.seqlen <= 0:
       raise ValueError(
           'Must set p.decoder_tpl.seqlen > 0, current value = '
           f'{decoder_params.seqlen}'
       )
     max_prefix_len = input_batch.ids.shape[1]
-    logging.info("max_prefix_len: {}".format(max_prefix_len))
+    # logging.info("max_prefix_len: {}".format(max_prefix_len))
     
     decode_mesh_transpose = decoder_params.decode_loop_mesh_axes_transpose
     if decode_mesh_transpose:
@@ -1796,10 +1796,10 @@ class LanguageModelContinuousBatching(base_model.BaseModel):
         transform_state_fn=transform_decode_state_fn,
     )
     decode_state.update(input_batch)
-    logging.info("init decode cache: {}".format(self.variables[base_layer.DECODE_CACHE]))
+    # logging.info("init decode cache: {}".format(self.variables[base_layer.DECODE_CACHE]))
     # decode_state.update(self.variables[base_layer.DECODE_CACHE])
-    logging.info("init decode done: {}".format(decode_state.done))
-    logging.info("init decode state: {}".format(decode_state))
+    # logging.info("init decode done: {}".format(decode_state.done))
+    # logging.info("init decode state: {}".format(decode_state))
     return decode_state
 
   def left_align_kv_cache(
@@ -1853,61 +1853,8 @@ class LanguageModelContinuousBatching(base_model.BaseModel):
 
     return jax.vmap(_align_one)(x, prefix_lengths)
 
-  def left_align_kv_cache2(
-      self, x: JTensor, lengths: JTensor, align_dim: int = 1
-  ) -> JTensor:
-    """Aligns a tensor with padding to the right.
 
-    x could have the following left align format:
-    |---max_length---|
-    [P, P, 0, 0, 0, 0]
-    where lengths = 2, there are 4 paddings.
-
-    After right align, x will have the following format:
-    |---max_length---|
-    [0, 0, 0, 0, P, P]
-
-    Args:
-      x: Tensors to right align with paddings on the right.
-      lengths: JTensor [batch_size] with dtype jnp.int32, length of x without
-        padding.
-      align_dim: Dim to align, align_dim < len(x.shape).
-
-    Returns:
-      Right align x with shape [batch_size, seq_len].
-    """
-    if align_dim >= len(x.shape):
-      raise ValueError(
-          f'The align_dim: {align_dim} should be smaller than '
-          f'x.rank: {len(x.shape)}.'
-      )
-    seq_len = x.shape[align_dim]
-
-    def _align_one(x: JTensor, length: JTensor) -> JTensor:
-      """Aligns a single tensor to the right, moving paddings to the left."""
-      # Pad the tensor one the first dimension.
-      paddings = [[0, 0]] * len(x.shape)
-      paddings[0] = [0, seq_len]
-      padded = jnp.pad(x, paddings)
-
-      # Slice out the right align tensor.
-      start_indices = [0] * len(x.shape)
-      start_indices[0] = length
-      sizes = list(x.shape)
-      sizes[0] = seq_len
-      return jax.lax.dynamic_slice(padded, start_indices, sizes)
-
-    return jax.vmap(_align_one)(x, lengths)
-
-
-  def greedy_decode_step(self, decode_state: NestedMap, decoder_params: DecoderHParams):
-    def extend_step_fn(mdl, ids, segment_pos):
-      xent = mdl.extend_step(ids, segment_pos=segment_pos)
-      return xent.logits
-
-    def transform_decode_state_fn(mdl, transform_fn):
-      mdl.transform_decode_state(transform_fn)
-
+  def left_align_decode_state(self, decode_state):
     # when reach end of seq_len, align all tensors to left end, reset step
     # TODO: this is executed every decoding step, will this increase latency?
     max_prefix_len = decode_state.ids.shape[1]
@@ -1970,7 +1917,39 @@ class LanguageModelContinuousBatching(base_model.BaseModel):
     
     decode_state.step = jnp.where(decode_state.step < row_length-1, decode_state.step, left_align_steps)
     self.variables[base_layer.DECODE_CACHE]['lm']['time_step'] = decode_state.step
-  
+    
+    return decode_state
+
+  def greedy_decode_step(
+    self, decode_state: NestedMap, 
+    # decode_cache: NestedMap, 
+    decoder_params: DecoderHParams,
+    align_decode_state
+  ):
+
+    def extend_step_fn(mdl, ids, segment_pos):
+      xent = mdl.extend_step(ids, segment_pos=segment_pos)
+      return xent.logits
+
+    def transform_decode_state_fn(mdl, transform_fn):
+      mdl.transform_decode_state(transform_fn)
+
+    # self.variables.update(decode_cache)
+    # logging.info("updated decode cache in decode step")
+
+    # # The following doesn't work. May use this for simplicity
+    # identity = lambda x: x
+    # row_length = decode_state.output_ids.shape[1]
+    # decode_state = jax.lax.cond(
+    #   decode_state.step < row_length - 1, 
+    #   identity, 
+    #   self.left_align_decode_state,
+    #   operand=decode_state)
+    
+    logging.info("align decode state")
+    if align_decode_state:
+      decode_state = self.left_align_decode_state(decode_state)
+
     decode_state = sample_decode.greedy_decode_step_new(
         model=self.lm,
         extend_step_fn=extend_step_fn,

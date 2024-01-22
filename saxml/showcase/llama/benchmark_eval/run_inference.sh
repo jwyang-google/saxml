@@ -1,10 +1,10 @@
 #!/bin/bash
 
 # Multi-Host vlp (TODO: replace these params for your own config)
-NAME="jwyang-tpu-vm-mlperf" 
+NAME="jwyang-tpu-vm"
 ACCELERATOR_TYPE="v5litepod-4"
 RUNTIME_VERSION="v2-alpha-tpuv5-lite"
-PROJECT="tpu-prod-env-automated"
+PROJECT="tpu-prod-env-small"
 ZONE="us-east1-c"
 
 USER=jwyang 
@@ -22,7 +22,7 @@ MODEL_ID=/sax/test/llama
 run_inference() {
   gcloud compute tpus tpu-vm \
     scp --recurse --zone=${ZONE} \
-    $PWD/inference/benchmarks/models/llama/benchmark_eval/openorca_eval.py \
+    $PWD/saxml/showcase/llama/benchmark_eval/openorca_eval.py \
     --worker=0 ${NAME}:~/saxml/saxml/server/ \
     --project=${PROJECT} \
     --scp-flag "-o ProxyCommand=corp-ssh-helper %h %p"
@@ -36,7 +36,7 @@ run_inference() {
                 python3.10 saxml/server/openorca_eval.py \
                   --model_id ${MODEL_ID} \
                   --data_pkl /home/${USER}/llama/data/open_orca_gpt4_50k_filtered_tokenized_llama_prompt.pkl \
-                  --num_samples 256 \
+                  --num_samples 512 \
                   --results_dir ${RESULT_DIR} \
                   --batch_size ${1} \
                   --input_seq_len ${2} \
