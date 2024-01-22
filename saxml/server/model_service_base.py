@@ -1613,9 +1613,8 @@ class ModelServicesRunner:
     # decoding loop
     step = 0
     requests_in_decoding = 0
-    # first_stop_decoded_steps = 10
-    # second_stop_decode_steps = 20
 
+    # profiling stats
     insert_times = []
     decode_step_times = []
     fetch_state_times = []
@@ -1639,9 +1638,6 @@ class ModelServicesRunner:
                 logging.info("Number of requests in decoding: {}".format(requests_in_decoding))
                 if requests_in_decoding == 0:
                   next_request = self._batcher.get_decoding_batch()
-                # elif step in [first_stop_decoded_steps, second_stop_decode_steps]:
-                #   # simulate continuous batching when first request is decoded by a few steps
-                #   next_request = self._batcher.get_decoding_batch()
                 else:
                   next_request = self._batcher.get_decoding_batch(block=False)
               
@@ -1669,6 +1665,7 @@ class ModelServicesRunner:
               # logging.info("Updated decode state decode_lengths: {}".format(decode_state.decode_lengths))
               # logging.info("Updated decode state prefix_lengths: {}".format(decode_state.prefix_lengths))
               # logging.info("Updated decode output_ids: {}".format(decode_state.output_ids))
+        
         end_insert_time = time.time()
         insert_time_ms = 1000 * (end_insert_time - start_insert_time)
         if step > 1000:
@@ -1677,14 +1674,15 @@ class ModelServicesRunner:
 
         # decoding step
         start_step_time = time.time()
+        
         global_step = decode_state.step
         logging.info("decode_state step: {}".format(global_step))
         align_decode_state = False
         if jnp.equal(global_step, 2047):
           align_decode_state = True
         logging.info("align_decode_state: {}".format(align_decode_state))
+        
         decode_state, decode_cache = method_obj.device_compute_decoding_step(
-        # method_obj.device_compute_decoding_step(
           unpadded_shape=continuous_batching_input_shape,
           decode_state=decode_state,
           decode_cache=decode_cache,
@@ -1736,14 +1734,12 @@ class ModelServicesRunner:
             requests_in_decoding -= 1
             requests_in_processing[slot_idx] = None
 
-            # utils.traceprint_all(
-            #     input_batch.rpc_tasks, f'After device compute {input_batch.method}'
-            # )
             if result is None:
               input_batch.finish()
             else:
               self._postprocess_async(model, input_batch, result, streaming_done)
               del result
+        
         end_process_result_time = time.time()
         process_result_time_ms = 1000 * (end_process_result_time - start_process_result_time)
         if step > 1000:
@@ -1763,176 +1759,6 @@ class ModelServicesRunner:
         step += 1
       except Exception as e:  # pylint: disable=broad-except
         self._worker_thread_exception = e
-        break
-
-  def _run_decoding_loop_step(self):
-    """Continuous batching prototype. (single model, greedy decoding)"""
-    from jax import numpy as jnp
-
-    # start processing until first batch is ready
-    batch = self._batcher.get_decoding_batch()
-    batch.wait_for_ready()
-    utils.traceprint_all(
-        batch.rpc_tasks, f'first batch is ready for process'
-    )
-
-    model = self._loaded_models.get_model(batch.method.model_key)
-    method_obj = model.method(batch.method.name)
-    # input_batch_tensors, decode_data, decode_state = method_obj.init_model_state()
-    # logging.info("dummy input batch: {}".format(input_batch_tensors))
-
-    # initialize decode_data and decode_state
-    decode_data = method_obj.device_compute_prefill(
-      input_batch=batch.input_tensors,
-      unpadded_shape=batch.unpadded_shape
-    )
-    decode_state = method_obj.device_compute_init_decode_state(
-      input_batch=batch.input_tensors,
-      unpadded_shape=batch.unpadded_shape,
-      decode_data=decode_data
-    )
-    done_idx = jnp.nonzero(decode_state.done)
-    logging.info("initial done_idx: {}".format(done_idx))
-    logging.info("input_batch: {}".format(batch))
-    logging.info("decode_data: {}".format(decode_data))
-    logging.info("decode_state: {}".format(decode_state))
-
-    # decoding loop
-    step = 0
-    while True:
-      try:
-        if len(done_idx[0]):
-          # get new request
-          batch = self._batcher.get_decoding_batch()
-          batch.wait_for_ready()
-          model = self._loaded_models.get_model(batch.method.model_key)
-          method_obj = model.method(batch.method.name)
-          
-          # insert and prefill
-          decode_data = method_obj.device_compute_prefill(
-            input_batch=batch.input_tensors,
-            unpadded_shape=batch.unpadded_shape
-          )
-          decode_state = method_obj.device_compute_init_decode_state(
-            input_batch=batch.input_tensors,
-            unpadded_shape=batch.unpadded_shape,
-            decode_data=decode_data
-          )
-
-          step = 0
-
-        decode_state = method_obj.device_compute_decoding_step(
-          # input_batch=batch.input_tensors,
-          unpadded_shape=batch.unpadded_shape,
-          decode_state=decode_state
-        )
-        done_idx = jnp.nonzero(decode_state.done)
-        logging.info("step: {}, done_idx: {}".format(step, done_idx))
-        step += 1
-
-        # return results of requests which are finished decoding
-        if len(done_idx[0]):
-          logging.info("Done decoding, processing result for {}".format(done_idx))
-          streaming_done = None
-          result = method_obj.device_compute_process_result(
-            # input_batch=batch.input_tensors,
-            unpadded_shape=batch.unpadded_shape,
-            decode_state=decode_state
-          )
-          utils.traceprint_all(
-              batch.rpc_tasks, f'After device compute {batch.method}'
-          )
-
-          if result is None:
-            batch.finish()
-          else:
-            self._postprocess_async(model, batch, result, streaming_done)
-            del result
-      
-      except Exception as e:  # pylint: disable=broad-except
-        self._worker_thread_exception = e
-        batch.finish()
-        break
-
-  def _run_decoding_loop(self):
-    """Main loop for processing batches."""
-    while True:
-      batch = self._batcher.get_decoding_batch()
-      print("getting decoding batch: {}".format(batch))
-      try:
-        self._inform_secondary_hosts(
-            batch.method.name,
-            batch.method.model_key,
-            str(batch.unpadded_shape),
-            skip_host_sync=batch.skip_host_sync,
-        )
-        model = self._loaded_models.get_model(batch.method.model_key)
-        batch.wait_for_ready()
-        utils.traceprint_all(
-            batch.rpc_tasks, f'Before device compute {batch.method}'
-        )
-        method_obj = model.method(batch.method.name)
-
-        streaming_done = None
-        if batch.input_tensors is None:
-          # Failed preprosessing. Since we have already informed secondary
-          # hosts, we need to compute on tensors.
-          if self._spmd_backend.spmd_host_count() > 1:
-            # JAX dispatches device_compute synchronously to XLA:GPU. Hence
-            # _postprocess_stream_async must start before device_compute,
-            # otherwise device_compute may block the consumption of streaming
-            # queue until it finishes.
-            if method_obj.streamable:
-              streaming_done = utils.Notification()
-              self._postprocess_stream_async(model, batch, streaming_done)
-            result = method_obj.device_compute_with_dummy_data(
-                batch.unpadded_shape
-            )
-          else:
-            result = None
-        else:
-          # import jax
-          # logging.info("Starting JAX trace===================================") 
-          # trace_folder = "/home/jwyang/jax-trace/" 
-          # jax.profiler.start_trace(trace_folder)
-
-          decode_data = method_obj.device_compute_prefill(
-            input_batch=batch.input_tensors,
-            unpadded_shape=batch.unpadded_shape
-          )
-          init_decode_state = method_obj.device_compute_init_decode_state(
-            input_batch=batch.input_tensors,
-            unpadded_shape=batch.unpadded_shape,
-            decode_data=decode_data
-          )
-          decode_state = method_obj.device_compute_decoding_loop(
-            input_batch=batch.input_tensors,
-            unpadded_shape=batch.unpadded_shape,
-            decode_state=init_decode_state
-          )
-          result = method_obj.device_compute_process_result(
-            input_batch=batch.input_tensors,
-            unpadded_shape=batch.unpadded_shape,
-            decode_data=decode_data,
-            decode_state=decode_state
-          )
-
-          # jax.block_until_ready(result) 
-          # jax.profiler.stop_trace() 
-          # logging.info("Finished JAX trace at {}=============================".format(trace_folder))
-        
-        utils.traceprint_all(
-            batch.rpc_tasks, f'After device compute {batch.method}'
-        )
-
-        if result is None:
-          batch.finish()
-        else:
-          self._postprocess_async(model, batch, result, streaming_done)
-          del result
-      except Exception as e:  # pylint: disable=broad-except
-        self._worker_thread_exception = e
-        batch.finish()
         break
 
   def _run_primary_worker_loop(self):

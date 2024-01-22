@@ -1612,8 +1612,7 @@ class LanguageModelContinuousBatching(base_model.BaseModel):
       input_batch: NestedMap,
       decoder_params: DecoderHParams,
     ) -> NestedMap:
-    # decoder_params = self.decoder_tpl
-    logging.info("prefill input batch: {}".format(input_batch))
+    # logging.info("prefill input batch: {}".format(input_batch))
     if decoder_params.seqlen <= 0:
       raise ValueError(
           'Must set p.decoder_tpl.seqlen > 0, current value = '
@@ -1634,9 +1633,8 @@ class LanguageModelContinuousBatching(base_model.BaseModel):
       )
 
     fprop_fn(self.lm, decode_data.input_ids, decode_data.input_paddings)
-    # logging.info("greedy prefill decode cache: {}".format(self.variables[base_layer.DECODE_CACHE]))
     return decode_data
-
+  
   def greedy_prefill_and_insert(
       self, 
       input_batch: NestedMap, 
@@ -1740,7 +1738,7 @@ class LanguageModelContinuousBatching(base_model.BaseModel):
     # logging.info("Update decode cache: {}".format(decode_cache))
     self.variables[base_layer.DECODE_CACHE].update(decode_cache)
     # logging.info("After update decode cache: {}".format(self.variables[base_layer.DECODE_CACHE]))
-    return decode_state #, decode_cache
+    return decode_state 
   
   def greedy_init_decode_state(
       self,
@@ -1797,7 +1795,6 @@ class LanguageModelContinuousBatching(base_model.BaseModel):
     )
     decode_state.update(input_batch)
     # logging.info("init decode cache: {}".format(self.variables[base_layer.DECODE_CACHE]))
-    # decode_state.update(self.variables[base_layer.DECODE_CACHE])
     # logging.info("init decode done: {}".format(decode_state.done))
     # logging.info("init decode state: {}".format(decode_state))
     return decode_state
@@ -1852,7 +1849,6 @@ class LanguageModelContinuousBatching(base_model.BaseModel):
       )
 
     return jax.vmap(_align_one)(x, prefix_lengths)
-
 
   def left_align_decode_state(self, decode_state):
     # when reach end of seq_len, align all tensors to left end, reset step
@@ -1926,16 +1922,12 @@ class LanguageModelContinuousBatching(base_model.BaseModel):
     decoder_params: DecoderHParams,
     align_decode_state
   ):
-
     def extend_step_fn(mdl, ids, segment_pos):
       xent = mdl.extend_step(ids, segment_pos=segment_pos)
       return xent.logits
 
     def transform_decode_state_fn(mdl, transform_fn):
       mdl.transform_decode_state(transform_fn)
-
-    # self.variables.update(decode_cache)
-    # logging.info("updated decode cache in decode step")
 
     # # The following doesn't work. May use this for simplicity
     # identity = lambda x: x
@@ -1946,7 +1938,7 @@ class LanguageModelContinuousBatching(base_model.BaseModel):
     #   self.left_align_decode_state,
     #   operand=decode_state)
     
-    logging.info("align decode state")
+    # logging.info("align decode state")
     if align_decode_state:
       decode_state = self.left_align_decode_state(decode_state)
 
@@ -1960,22 +1952,6 @@ class LanguageModelContinuousBatching(base_model.BaseModel):
     )
     return decode_state
   
-  def greedy_decode_step_while(self, decode_state: NestedMap):
-    def extend_step_fn(mdl, ids, segment_pos):
-      xent = mdl.extend_step(ids, segment_pos=segment_pos)
-      return xent.logits
-
-    def transform_decode_state_fn(mdl, transform_fn):
-      mdl.transform_decode_state(transform_fn)
-
-    decode_state = sample_decode.greedy_decode_step_with_while(
-        model=self.lm,
-        extend_step_fn=extend_step_fn,
-        transform_state_fn=transform_decode_state_fn,
-        decode_state=decode_state,
-    )
-    return decode_state
-
   def greedy_process_result_with_idx(
       self,
       decode_state: NestedMap,
@@ -1995,114 +1971,6 @@ class LanguageModelContinuousBatching(base_model.BaseModel):
         process_result_fn=decoder_params.process_result_fn,
     )
 
-    if hasattr(result, 'eval_sample_weights'):
-      num_decoded = jnp.sum(result.eval_sample_weights)
-    else:
-      num_decoded = jnp.array(result.prefix_ids.shape[0], jnp.float32)
-    metrics = NestedMap(num_decoded=(num_decoded, jnp.array(1, jnp.float32)))
-    out_clu_metrics = NestedMap()
-    return metrics, result, out_clu_metrics
-
-  def greedy_process_result(
-      self,
-      # input_batch: NestedMap,
-      decode_state: NestedMap,
-      decoder_params: DecoderHParams,
-  ):
-    # max_prefix_len = input_batch.ids.shape[1]
-    max_prefix_len = decode_state.ids.shape[1]
-    result = sample_decode.greedy_process_result(
-        model=self.lm,
-        decode_state=decode_state,
-        fprop_for_prefix=decoder_params.fprop_for_prefix,
-        prefix_ids=decode_state.prefix_ids,
-        prefix_paddings=decode_state.prefix_paddings,
-        max_prefix_len=max_prefix_len,
-        prefix_lengths=decode_state.prefix_lengths,
-        process_result_fn=decoder_params.process_result_fn,
-    )
-    # result.update(input_batch)
-
-    if hasattr(result, 'eval_sample_weights'):
-      num_decoded = jnp.sum(result.eval_sample_weights)
-    else:
-      num_decoded = jnp.array(result.prefix_ids.shape[0], jnp.float32)
-    metrics = NestedMap(num_decoded=(num_decoded, jnp.array(1, jnp.float32)))
-    out_clu_metrics = NestedMap()
-    return metrics, result, out_clu_metrics
-
-  def greedy_decoding_loop_new(
-      self,
-      input_batch: NestedMap,
-      decode_data: NestedMap,
-      decoder_params: DecoderHParams,
-  ):
-    decode_state = self.greedy_init_decode_state(input_batch, decode_data, decoder_params)
-    decode_state = self.greedy_decode_step_while(decode_state=decode_state)
-    return self.greedy_process_result(input_batch, decode_data, decode_state, decoder_params)
-
-  def greedy_decoding_loop(
-      self,
-      input_batch: NestedMap,
-      decode_data: NestedMap,
-      decoder_params: DecoderHParams,
-  ):
-    # decoder_params = self.decoder_tpl
-    # greedy decoding loop (no prefill)
-    if decoder_params.seqlen <= 0:
-      raise ValueError(
-          'Must set p.decoder_tpl.seqlen > 0, current value = '
-          f'{decoder_params.seqlen}'
-      )
-    # max_prefix_len = decode_data.input_ids.shape[1]
-    max_prefix_len = input_batch.ids.shape[1]
-    print("max_prefix_length: {}".format(max_prefix_len))
-
-    decode_mesh_transpose = decoder_params.decode_loop_mesh_axes_transpose
-    if decode_mesh_transpose:
-      lm_var_hparams = self.lm.abstract_init_with_metadata(
-          decode_data.fprop_input_ids,
-          decode_data.fprop_input_paddings,
-          segment_ids=decode_data.fprop_segment_ids,
-          segment_pos=decode_data.fprop_segment_pos,
-          start_time_step=decode_data.start_time_step,
-          causal_attention_mask=decode_data.causal_attention_mask,
-          **decode_data.extra_input_kwargs,
-      )
-
-      lm_var_pspecs = base_layer.var_partition_specs(
-          lm_var_hparams, self.lm.mesh_shape, self.lm.mesh_axis_names
-      )
-    else:
-      lm_var_pspecs = None
-    logging.info('decode_mesh_transpose: %s', decode_mesh_transpose)
-
-    def extend_step_fn(mdl, ids, segment_pos):
-      xent = mdl.extend_step(ids, segment_pos=segment_pos)
-      return xent.logits
-
-    def transform_decode_state_fn(mdl, transform_fn):
-      mdl.transform_decode_state(transform_fn)
-
-    assert isinstance(decoder_params, GreedyDecoderHParams)
-    result = sample_decode.greedy_decode_while_loop(
-        self.lm,
-        extend_step_fn,
-        decode_data.input_ids,
-        decode_data.input_paddings,
-        decode_data.seqlen,
-        fprop_for_prefix=decoder_params.fprop_for_prefix,
-        transform_state_fn=transform_decode_state_fn,
-        max_prefix_len=max_prefix_len,
-        max_decode_steps=decoder_params.max_decode_steps,
-        prefix_lengths=decode_data.prefix_lengths,
-        eos_id=decoder_params.eos_id,
-        decode_loop_mesh_axes_transpose=decode_mesh_transpose,
-        model_var_pspecs=lm_var_pspecs,
-        process_result_fn=decoder_params.process_result_fn,
-    )
-
-    result.update(input_batch)
     if hasattr(result, 'eval_sample_weights'):
       num_decoded = jnp.sum(result.eval_sample_weights)
     else:
