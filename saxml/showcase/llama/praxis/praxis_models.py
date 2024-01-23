@@ -1642,6 +1642,7 @@ class LanguageModelContinuousBatching(base_model.BaseModel):
       decode_state,
       # decode_cache,
       slot_idx):
+    
     decode_cache = jax.tree_map(jnp.copy, self.variables[base_layer.DECODE_CACHE])
 
     # print input tensor shapes
@@ -1651,9 +1652,9 @@ class LanguageModelContinuousBatching(base_model.BaseModel):
     # logging.info("decode cache: {}".format(decode_cache))
 
     # prefill
-    prefill_decode_data = self.greedy_prefill(input_batch, decoder_params)
     prefill_decode_state = self.greedy_init_decode_state(
-      input_batch, prefill_decode_data, decoder_params)
+      input_batch, decoder_params
+    )
     # logging.info("prefill decode data: {}".format(prefill_decode_data))
     # logging.info("prefill decode state: {}".format(prefill_decode_state))
 
@@ -1739,20 +1740,17 @@ class LanguageModelContinuousBatching(base_model.BaseModel):
     self.variables[base_layer.DECODE_CACHE].update(decode_cache)
     # logging.info("After update decode cache: {}".format(self.variables[base_layer.DECODE_CACHE]))
     return decode_state 
-  
+
   def greedy_init_decode_state(
       self,
       input_batch: NestedMap,
-      decode_data: NestedMap,
-      decoder_params: DecoderHParams
-  ):
+      decoder_params: DecoderHParams,
+    ) -> NestedMap:
+    decode_data = self.greedy_prefill(input_batch, decoder_params)
+
     # logging.info("init decode state input batch: {}".format(input_batch))
     # logging.info("init decode state decode data: {}".format(decode_data))
-    if decoder_params.seqlen <= 0:
-      raise ValueError(
-          'Must set p.decoder_tpl.seqlen > 0, current value = '
-          f'{decoder_params.seqlen}'
-      )
+    
     max_prefix_len = input_batch.ids.shape[1]
     # logging.info("max_prefix_len: {}".format(max_prefix_len))
     

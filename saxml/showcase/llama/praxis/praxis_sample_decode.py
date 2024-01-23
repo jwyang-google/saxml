@@ -2022,7 +2022,6 @@ def greedy_decode_simplify(
   with decoder_utils.maybe_decode_mesh_transpose(
       model, decode_loop_mesh_axes_transpose
   ):
-    # what does this do?
     if transform_state_fn:
       # Pad to full-sequence length.
       first_max_decode_steps = (
@@ -2422,7 +2421,6 @@ def greedy_decode_step_continuous_batching(
         prefix_offset = max_prefix_len
         decode_lengths = prefix_lengths + (per_sample_steps - max_prefix_len + 2)
       # else:
-      #   # TODO (not sure what this do. ignore for now)
       #   # if eos is part of prefix, ignore it.
       #   val.done = jnp.where(step < prefix_lengths - 1, prev_done, val.done)
       #   prefix_offset = prefix_lengths
@@ -2497,7 +2495,7 @@ def greedy_init_decode_state(
   seq_len = max_prefix_len + max_decode_steps[0]
   output_ids = jnp.zeros(shape=(batch_size, seq_len), dtype=jnp.int32)
 
-  # initialize decode state
+  # # initialize decode state
   decode_state = NestedMap()
   if fprop_for_prefix:
     # Update output_ids with prefix_ids.

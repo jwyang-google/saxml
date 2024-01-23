@@ -1572,13 +1572,14 @@ class ModelServicesRunner:
 
     self._stream_pool.run(_postprocess)
 
+
   def _run_decoding_loop_new(self):
     """Continuous batching prototype. (single model, greedy decoding)"""
     from jax import numpy as jnp
 
-    # start processing until first batch is ready
+    # start processing until first request is ready
     request = self._batcher.get_decoding_batch()
-    logging.info("First request batch: {}".format(request))
+    logging.info("first request batch: {}".format(request))
     utils.traceprint_all(
         request.rpc_tasks, f'first batch is ready for process'
     )
@@ -1593,19 +1594,15 @@ class ModelServicesRunner:
     assert method_obj._method_hparams.decoder.enable_continuous_batching
     continuous_batching_batch_size = method_obj._method_hparams.decoder.continuous_batching_batch_size
     seq_len = method_obj._method_hparams.max_input_seq_len
-    logging.info("Continuous batching set up params: batch_size {}, seq_len {}".format(
-      continuous_batching_batch_size, seq_len))
-
-    requests_in_processing = [None] * continuous_batching_batch_size
     prefill_input_shape = LMInputShapeInfo(1, seq_len)
     continuous_batching_input_shape = LMInputShapeInfo(continuous_batching_batch_size, seq_len)
+    logging.info("continuous batching params: batch_size {}, seq_len {}".format(
+      continuous_batching_batch_size, seq_len))
+
 
     # initialize decode_state
-    decode_state, decode_cache = method_obj.init_model_state()
+    decode_state, decode_cache = method_obj.init_decode_state()
     logging.info("decode state devices: {}".format(decode_state.done.devices()))
-    # logging.info("Initial decode state global step: {}".format(decode_state.step))
-    # logging.info("Initial decode state per_sample_steps: {}".format(decode_state.per_sample_steps))
-    # logging.info("Initial decode state done: {}".format(decode_state.done))
     
     done_idx = jnp.nonzero(decode_state.done)[0]
     # logging.info("Initial done_idx: {}".format(done_idx))
@@ -1613,6 +1610,7 @@ class ModelServicesRunner:
     # decoding loop
     step = 0
     requests_in_decoding = 0
+    requests_in_processing = [None] * continuous_batching_batch_size
 
     # profiling stats
     insert_times = []
