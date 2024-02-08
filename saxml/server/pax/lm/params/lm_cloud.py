@@ -251,6 +251,7 @@ class LLaMA7BFP16TPUv4(LLaMA7BFP16):
   Latency = 0.688s with 128 decoded tokens. 5ms per output token
   """
 
+  ENABLE_GENERATE_STREAM = True
   ICI_MESH_SHAPE = [1, 1, 4]
 
   @property
@@ -674,3 +675,45 @@ class LmCloudSpmd175B256Test(LmCloudSpmd175BTest):
   """175B Servable config on 1x1x256 in test mode."""
 
   ICI_MESH_SHAPE = [1, 1, 256]
+
+@servable_model_registry.register
+class LLaMA70BFP16TPUv5e16(LLaMA70BFP16TPUv5e):
+
+  # Decoding params
+  INPUT_SEQ_LEN = 1024
+  NUM_SAMPLES = 1
+  TOP_K = 1
+
+  MAX_DECODE_STEPS = 1024
+  BUCKET_KEYS = [32, 128, 1024]
+
+  BATCH_SIZE = 72
+
+  ICI_MESH_SHAPE = [1, 1, 16]
+
+  USE_BATCH_SHARDING = True
+
+  ENABLE_GENERATE_STREAM = False
+
+
+  @property
+  def test_mode(self) -> bool:
+    return False
+
+
+@servable_model_registry.register
+@quantization.for_transformer(quantize_on_the_fly=False, linear_only=True)
+class LLaMA70BInt8TPUv5e16(LLaMA70BFP16TPUv5e16):
+  USE_REPEATED_LAYER = False
+  REPEATED_LAYERS = False
+
+
+@servable_model_registry.register
+class LLaMA70BTokenizedInt8TPUv5e16(LLaMA70BInt8TPUv5e16):
+  TOKENIZED_INPUT = True
+  TOKENIZED_OUTPUT = True
+
+@servable_model_registry.register
+class LLaMA70BStreamInt8TPUv5e16(LLaMA70BInt8TPUv5e16):
+  ENABLE_GENERATE_STREAM = True
+  STREAM_INTERVAL_STEPS = 1
