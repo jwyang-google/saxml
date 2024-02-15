@@ -99,6 +99,9 @@ class CommonServingTemplate:
   GENERATION_USE_GEOMEAN_PROB_SCORE = False
   SCORING_USE_GEOMEAN_PROB_SCORE = False
   SCORING_INCLUDE_EOS_SCORE = False
+  NUM_CACHE_SLOTS = 0
+  # if NUM_CACHE_SLOTS > 0, it will enable continuous batching with
+  # max batch_size = NUM_CACHE_SLOTS. Currently, only support NUM_SAMPLES=1
   NEXT_TOKEN_SAMPLER_TPL = pax_fiddle.Config(
       token_samplers.DefaultNextTokenSampler
   )
@@ -224,6 +227,7 @@ class ServingTemplate(
           eos_id=stop_token_ids,
           decode_loop_mesh_axes_transpose=self.DECODE_MESH_TRANSPOSE,
           emb_lookup_style=self.EMB_LOOKUP_STYLE,
+          num_cache_slots=self.NUM_CACHE_SLOTS,
       )
     else:
       generate_hparams = decoder_hparams.SampleDecoderHParams(
@@ -246,6 +250,7 @@ class ServingTemplate(
           emb_lookup_style=self.EMB_LOOKUP_STYLE,
           sort_samples=self.SORT_SAMPLES,
           next_token_sampler_tpl=self.NEXT_TOKEN_SAMPLER_TPL,
+          num_cache_slots=self.NUM_CACHE_SLOTS if self.NUM_SAMPLES > 1 else 0,
       )
     return servable_lm_model.DecodeHParams(
         batch_size=self.BATCH_SIZE,

@@ -1560,7 +1560,9 @@ class ModelServicesRunner:
           unpadded_shape = method.get_unpadded_shape(len(rpc_tasks), inputs)
           padded_shape = method.get_padded_input_shape(unpadded_shape)
           if prefill:
-            res = method.input_to_device_for_prefill(inputs, unpadded_shape)
+            res = method.input_to_device_for_continuous_batching(
+                inputs, unpadded_shape
+            )
           else:
             res = method.input_to_device(inputs, unpadded_shape, padded_shape)
           return res, padded_shape
@@ -1596,7 +1598,9 @@ class ModelServicesRunner:
               preprocess_fn=functools.partial(
                   preprocess_rpc_tasks, prefill=True
               ),
-              max_live_batches=method.batch_size * 4,
+              # Note: batch size of this method is always 1 so max_live_batches
+              # denotes the number of live requests.
+              max_live_batches=method.num_cache_slots * 2,
           )
 
           self._token_batching_state[model_key] = ContinuousBatchingState(
@@ -2073,7 +2077,7 @@ class ModelServicesRunner:
             ]
             * state.slots_in_use
         )
-        token_batch = method_obj.input_to_device_for_prefill(
+        token_batch = method_obj.input_to_device_for_continuous_batching(
             token_batch,
             InputShapeInfo(batch_size=state.num_cache_slots),
         )
