@@ -1984,14 +1984,13 @@ class ModelServicesRunner:
               logging.info("Starting JAX trace===================================") 
               trace_folder = "/tmp/jax-trace/" 
               jax.profiler.start_trace(trace_folder) 
-              result = method_obj.device_compute( input_batch=batch.input_tensors, unpadded_shape=batch.unpadded_shape, ) 
-              jax.block_until_ready(result) 
-              jax.profiler.stop_trace() 
-              logging.info("Finished JAX trace at {}=============================".format(trace_folder))
               result = method_obj.device_compute(
                   input_batch=batch.input_tensors,
                   padded_shape=batch.padded_shape,
               )
+              jax.block_until_ready(result) 
+              jax.profiler.stop_trace() 
+              logging.info("Finished JAX trace at {}=============================".format(trace_folder))
             if result is None:
               batch.finish()
             else:
