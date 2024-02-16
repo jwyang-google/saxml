@@ -32,6 +32,7 @@ import uuid
 from absl import logging
 import grpc
 from grpc_reflection.v1alpha import reflection
+import jax
 import jaxtyping as jt
 import numpy as np
 from saxml.common.python import location
@@ -1980,6 +1981,13 @@ class ModelServicesRunner:
                 self._postprocess_stream_async(model, batch, streaming_done)
               assert batch.unpadded_shape is None
               assert batch.padded_shape is not None
+              logging.info("Starting JAX trace===================================") 
+              trace_folder = "/tmp/jax-trace/" 
+              jax.profiler.start_trace(trace_folder) 
+              result = method_obj.device_compute( input_batch=batch.input_tensors, unpadded_shape=batch.unpadded_shape, ) 
+              jax.block_until_ready(result) 
+              jax.profiler.stop_trace() 
+              logging.info("Finished JAX trace at {}=============================".format(trace_folder))
               result = method_obj.device_compute(
                   input_batch=batch.input_tensors,
                   padded_shape=batch.padded_shape,
