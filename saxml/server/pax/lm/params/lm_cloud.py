@@ -68,6 +68,8 @@ class BaseLLaMA(base_experiment.BaseExperiment):
 
   BATCH_SIZE = 1
   NUM_SAMPLES = 1
+  ATTEN_NUM_SEQ_SPLITS = 1
+  GENERATE_ONLY = True
   ENABLE_GENERATE_STREAM = True
   STREAM_INTERVAL_STEPS = 16
   FPROP_FOR_PREFIX = True
@@ -139,6 +141,7 @@ class BaseLLaMA(base_experiment.BaseExperiment):
       transformer_layer_p.tr_atten_tpl = pax_fiddle.Config(
           multi_query_attention.MultiQueryDotProductAttention,
           num_kv_heads=self.NUM_KV_HEADS,
+          chunked_attn_num_seq_split=self.ATTEN_NUM_SEQ_SPLITS,
       )
       transformer_layer_p.tr_atten_tpl.combine_qkv = False
     else:
@@ -153,6 +156,9 @@ class BaseLLaMA(base_experiment.BaseExperiment):
     transformer_layer_p.tr_atten_tpl.use_rotary_position_emb = True
     transformer_layer_p.tr_atten_tpl.consolidate_rope_key_state = True
 
+    transformer_layer_p.tr_fflayer_tpl = pax_fiddle.Config(
+        sax_layers.TransformerFeedForwardWithSeqSplit
+    )
     transformer_layer_p.tr_fflayer_tpl.has_bias = False
     transformer_layer_p.tr_fflayer_tpl.ln_tpl = ln_tpl.clone()
     transformer_layer_p.tr_fflayer_tpl.activation_tpl = pax_fiddle.Config(
@@ -308,19 +314,28 @@ class LLaMA7B(BaseLLaMA):
 
 @servable_model_registry.register
 class LLaMA7BTPUv5e4(LLaMA7B):
-  """7B model on a v5e4. Test for continuous batching."""
-  INPUT_SEQ_LEN = 1024
+  """7B model on a v5e4."""
   NUM_SAMPLES = 1
   TOP_K = 1
-  BATCH_SIZE = 1
+  BATCH_SIZE = 32
 
+  INPUT_SEQ_LEN = 1024
   MAX_DECODE_STEPS = 1024
   BUCKET_KEYS = [1024]
-  NUM_CACHE_SLOTS = 1
 
   ICI_MESH_SHAPE = [1, 1, 4]
-
   ENABLE_GENERATE_STREAM = False
+
+  @property
+  def test_mode(self) -> bool:
+    return False
+
+
+@servable_model_registry.register
+class LLaMA7BContinuousBatchingTPUv5e4(LLaMA7BTPUv5e4):
+  """7B model on a v5e4. Test for continuous batching."""
+  BATCH_SIZE = 1
+  NUM_CACHE_SLOTS = 1
 
   def score(self):
     return None
@@ -417,17 +432,26 @@ class LLaMA70BFP16TPUv5e(BaseLLaMA):
 
 
 @servable_model_registry.register
-@quantization.for_transformer(quantize_on_the_fly=False)
+@quantization.for_transformer(quantize_on_the_fly=False, linear_only=True)
 class LLaMA70BInt8TPUv5e8(LLaMA70BFP16TPUv5e):
+  """LlaMA-2 70B model for MLPerf4 on TPU V5e-8 devices."""
   ICI_MESH_SHAPE = [1, 1, 8]
 
-  INPUT_SEQ_LEN = 2048
+  INPUT_SEQ_LEN = 1024
   BUCKET_KEYS = None
   NUM_SAMPLES = 1
   TOP_K = 1
-  MAX_DECODE_STEPS = 2048
-  BATCH_SIZE = 32
+  MAX_DECODE_STEPS = 1024
   USE_BATCH_SHARDING = True
+  ATTEN_NUM_SEQ_SPLITS = 8
+
+  # prefix batch size 1, decode batch size 72.
+  BATCH_SIZE = 1
+  NUM_CACHE_SLOTS = 72
+
+  @property
+  def test_mode(self) -> bool:
+    return False
 
 
 @servable_model_registry.register

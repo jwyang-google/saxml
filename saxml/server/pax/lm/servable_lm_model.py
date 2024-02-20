@@ -1082,86 +1082,97 @@ class LMDecodeMethodContinuousBatching(LMDecodeMethod):
     num_layers = self.model_num_layers
     head_dims = self.dim_per_head
     sql_len = self.input_sequence_len + self.max_decode_steps
-    kv_cache = {}
     consolidate_rope_key_state = False
     tr_atten_tpl = (
         self._model.lm_tpl.stacked_transformer_tpl.transformer_layer_params_tpl.tr_atten_tpl
     )
     if hasattr(tr_atten_tpl, 'consolidate_rope_key_state'):
       consolidate_rope_key_state = tr_atten_tpl.consolidate_rope_key_state
-    # TODO(jwyang): handle the case when consolidate_rope_key_state = True
-    for i in range(num_layers):
-      if self.num_kv_heads == 1:
-        kv_state_shape = (self.num_cache_slots, sql_len, head_dims)
-      else:
-        kv_state_shape = (
-            self.num_cache_slots,
-            sql_len,
-            self.num_kv_heads,
-            head_dims,
-        )
-      layer_kv_cache = {
-          'x_layers_{}'.format(i): {
-              'self_attention': {
-                  'key_state': jnp.zeros(
-                      kv_state_shape,
-                      dtype=self._model.fprop_dtype,
-                  ),
-                  'value_state': jnp.zeros(
-                      kv_state_shape,
-                      dtype=self._model.fprop_dtype,
-                  ),
-              }
-          }
-      }
-      if not consolidate_rope_key_state:
-        layer_kv_cache.update({
+
+    def _init_decode_cache_fn():
+      kv_cache = {}
+      for i in range(num_layers):
+        if self.num_kv_heads == 1:
+          kv_state_shape = (self.num_cache_slots, sql_len, head_dims)
+        else:
+          kv_state_shape = (
+              self.num_cache_slots,
+              sql_len,
+              self.num_kv_heads,
+              head_dims,
+          )
+        layer_kv_cache = {
             'x_layers_{}'.format(i): {
                 'self_attention': {
-                    'key_post_rotary_pos_emb': jnp.zeros(
+                    'key_state': jnp.zeros(
+                        kv_state_shape,
+                        dtype=self._model.fprop_dtype,
+                    ),
+                    'value_state': jnp.zeros(
                         kv_state_shape,
                         dtype=self._model.fprop_dtype,
                     ),
                 }
             }
-        })
-      kv_cache.update(layer_kv_cache)
-    decode_cache = {
-        'decoder_cache': {
-            'lm': {
-                'time_step': self.input_sequence_len - 1,
-                'transformer': kv_cache,
-            }
         }
-    }
+        if not consolidate_rope_key_state:
+          layer_kv_cache.update({
+              'x_layers_{}'.format(i): {
+                  'self_attention': {
+                      'key_post_rotary_pos_emb': jnp.zeros(
+                          kv_state_shape,
+                          dtype=self._model.fprop_dtype,
+                      ),
+                  }
+              }
+          })
+        kv_cache.update(layer_kv_cache)
+      return {
+          base_layer.DECODE_CACHE: {
+              'lm': {
+                  'time_step': self.input_sequence_len - 1,
+                  'transformer': kv_cache,
+              }
+          }
+      }
 
     # decode cache sharding with a_blnh
-
-    def _get_decode_pspec(x):
-      assert len(x.shape) in [3, 4]
-      atten_ap = (
-          self._model.lm_tpl.stacked_transformer_tpl.transformer_layer_params_tpl.tr_atten_tpl.activation_split_dims_mapping
-      )
-      sharding = None
-      if len(x.shape) == 3:
-        if hasattr(atten_ap, 'blh'):
-          sharding = atten_ap.blh
-        else:
-          sharding = (None, None, None)
-      if len(x.shape) == 4:
-        if hasattr(atten_ap, 'blnh'):
-          sharding = atten_ap.blnh
-        else:
-          sharding = (None, None, None, None)
-      return jax.sharding.PartitionSpec(*sharding)
+    atten_ap = tr_atten_tpl.activation_split_dims_mapping
+    if self.num_kv_heads == 1:
+      if hasattr(atten_ap, 'blh'):
+        kv_state_sharding = atten_ap.blh
+      else:
+        kv_state_sharding = (None, None, None)
+    else:
+      if hasattr(atten_ap, 'blnh'):
+        kv_state_sharding = atten_ap.blnh
+      else:
+        kv_state_sharding = (None, None, None, None)
+    kv_state_spec = base_layer.to_partition_spec(
+        kv_state_sharding, self._model.mesh_axis_names
+    )
+    transformer_decode_partition_spec = {}
+    for i in range(num_layers):
+      layer_kv_spec = {
+          'x_layers_{}'.format(i): {
+              'self_attention': {
+                  'key_state': kv_state_spec,
+                  'value_state': kv_state_spec,
+              }
+          }
+      }
+      if not consolidate_rope_key_state:
+        layer_kv_spec.update({
+            'x_layers_{}'.format(i): {
+                'self_attention': {'key_post_rotary_pos_emb': kv_state_spec}
+            }
+        })
+      transformer_decode_partition_spec.update(layer_kv_spec)
 
     time_step_partition_spec = jax.sharding.PartitionSpec()
-    transformer_decode_partition_spec = jax.tree_util.tree_map(
-        _get_decode_pspec,
-        decode_cache[base_layer.DECODE_CACHE]['lm']['transformer'],
-    )
+
     decode_cache_pspecs = {
-        'decoder_cache': {
+        base_layer.DECODE_CACHE: {
             'lm': {
                 'time_step': time_step_partition_spec,
                 'transformer': transformer_decode_partition_spec,
@@ -1169,8 +1180,12 @@ class LMDecodeMethodContinuousBatching(LMDecodeMethod):
         }
     }
 
+    init_decode_cache_fn = jax_exp.pjit.pjit(
+        _init_decode_cache_fn, out_shardings=decode_cache_pspecs
+    )
+
     # update mdl_vars and mdl_var_pspecs
-    self.decode_cache = decode_cache
+    self.decode_cache = init_decode_cache_fn()
     self.model_state.mdl_vars.update(self.decode_cache)
 
     self.decode_cache_pspecs = decode_cache_pspecs
@@ -1273,10 +1288,10 @@ class LMDecodeMethodContinuousBatching(LMDecodeMethod):
   def _register_for_input_shape(
       self, input_shape: servable_model.InputShapeInfo
   ):
-    # initialize kv cache and decode_state
-    self.init_decode_cache()
-    self.init_decode_state()
-
+    with self.model_state.global_mesh:
+      # initialize kv cache and decode_state
+      self.init_decode_cache()
+      self.init_decode_state()
     # dummy tokens for generate_fn
     tokens = jnp.zeros((self.num_cache_slots,), dtype=jnp.int32)
     self._dummy_tokens_for_generate = (
@@ -1284,14 +1299,22 @@ class LMDecodeMethodContinuousBatching(LMDecodeMethod):
             tokens, InputShapeInfo(batch_size=self.num_cache_slots)
         )
     )
-
     # prefill device function
     prefill_input_shape = InputShapeInfo(1)
     self._register_bs_infos_for_input_shape(prefill_input_shape)
     self._prefill_device_fn = self._pjit_device_fn_prefill(
         self._per_bs_infos[prefill_input_shape].batched_input_pspecs
     )
-
+    self._dummy_input_for_prefill = self.pre_processing(['Hello World'])
+    self._dummy_input_for_prefill = self.update_extra_inputs(
+        self._dummy_input_for_prefill,
+        prefill_input_shape.batch_size,
+        [self.default_extra_inputs] * prefill_input_shape.batch_size,
+    )
+    self._dummy_input_for_prefill = (
+        self.input_to_device_for_continuous_batching(
+            self._dummy_input_for_prefill, prefill_input_shape)
+    )
     # insert device function
     self._insert_device_fn = self._pjit_device_fn_insert()
 
@@ -1299,6 +1322,18 @@ class LMDecodeMethodContinuousBatching(LMDecodeMethod):
     generate_input_shape = InputShapeInfo(input_shape.batch_size)
     self._register_bs_infos_for_input_shape(generate_input_shape)
     self._generate_device_fn = self._pjit_device_fn_generate()
+    # warmup
+    if self.model_state.precompile:
+      _, _, prefix_state = self.prefill_with_dummy()
+      slot_in_use = 0
+      self.insert(prefix_state, slot_in_use)
+      self.generate_with_dummy()  # compile w/ left_align_decode_state = False
+      self.decode_state.step = jnp.array(
+          [self.max_decode_steps + self.input_sequence_len - 1],
+          dtype=jnp.int32)
+      self.generate_with_dummy()  # compile w/ left_align_decode_state = True
+      # reset slot 0.
+      self.insert(prefix_state, slot_in_use)
 
   # JIT compiled generate function
   def _pjit_device_fn_generate(self):
@@ -1345,6 +1380,7 @@ class LMDecodeMethodContinuousBatching(LMDecodeMethod):
         in_shardings=(self.model_state.mdl_var_pspecs, tokens_pspecs, None),
         out_shardings=(None, self.decode_cache_pspecs),
         static_argnums=3,
+        donate_argnums=(0,)
     )
 
   def call_model_function_generate(
@@ -1387,7 +1423,6 @@ class LMDecodeMethodContinuousBatching(LMDecodeMethod):
         prefix_decode_state,
         prefix_decode_cache,
         decode_state,
-        decode_cache,
         slot,
     ):
       mdl_vars = jax.tree_util.tree_map(
@@ -1404,29 +1439,23 @@ class LMDecodeMethodContinuousBatching(LMDecodeMethod):
             prefix_decode_state,
             prefix_decode_cache,
             decode_state,
-            decode_cache,
             slot,
         ):
           outputs = self.call_model_function_insert(
               prefix_decode_state,
               prefix_decode_cache,
               decode_state,
-              decode_cache,
               slot,
               mdl_vars,
               [k1, k2],
           )  # pytype: disable=wrong-arg-types  # jax-ndarray
 
-          updated_vars = outputs[1]
-          if base_layer.DECODE_CACHE in updated_vars:
-            del updated_vars[base_layer.DECODE_CACHE]
           return outputs
 
-        (decode_state, decode_cache), _ = _model_fn(
+        decode_state, decode_cache = _model_fn(
             prefix_decode_state,
             prefix_decode_cache,
             decode_state,
-            decode_cache,
             slot,
         )
         return decode_state, decode_cache
@@ -1438,10 +1467,10 @@ class LMDecodeMethodContinuousBatching(LMDecodeMethod):
             None,
             self.decode_cache_pspecs,
             None,
-            self.decode_cache_pspecs,
             None,
         ),
         out_shardings=(None, self.decode_cache_pspecs),
+        donate_argnums=(0,),
     )
 
   def call_model_function_insert(
@@ -1449,7 +1478,6 @@ class LMDecodeMethodContinuousBatching(LMDecodeMethod):
       prefix_decode_state,
       prefix_decode_cache,
       decode_state,
-      decode_cache,
       slot,
       mdl_vars,
       prng_key,
@@ -1468,7 +1496,6 @@ class LMDecodeMethodContinuousBatching(LMDecodeMethod):
         prefix_decode_state=prefix_decode_state,
         prefix_decode_cache=prefix_decode_cache,
         decode_state=decode_state,
-        decode_cache=decode_cache,
         slot=slot,
         method=self._model.sample_insert,
         mutable=[
@@ -1527,6 +1554,7 @@ class LMDecodeMethodContinuousBatching(LMDecodeMethod):
         _wrapped_fn_sample_prefill,
         in_shardings=(self.model_state.mdl_var_pspecs, batched_input_pspecs),
         out_shardings=(None, self.decode_cache_pspecs),
+        donate_argnums=(0,),
     )
 
   def call_model_function_prefill(self, inputs, mdl_vars, prng_key):
@@ -1587,8 +1615,7 @@ class LMDecodeMethodContinuousBatching(LMDecodeMethod):
       token: Next token of the prompt, sampled by model's default sampler.
       cache: Prefilled KV cache.
     """
-    prefill_input_shape = InputShapeInfo(1)
-    return self.prefill(self._per_bs_infos[prefill_input_shape].dummy_inputs)
+    return self.prefill(self._dummy_input_for_prefill)
 
   def insert(self, prefix_state: DeviceTensors, slot: int) -> None:
     """Insert the prefix state into the specified slot of the target state.
@@ -1601,6 +1628,7 @@ class LMDecodeMethodContinuousBatching(LMDecodeMethod):
     """
     # call device_fn insert to insert the prefill state to kv cache
     prefix_decode_state, prefix_decode_cache = prefix_state
+    self.model_state.mdl_vars.update(self.decode_cache)
     logging.info('insert into slot %d', slot)
     with self.model_state.global_mesh:
       new_decode_state, new_decode_cache = self._insert_device_fn(
@@ -1608,7 +1636,6 @@ class LMDecodeMethodContinuousBatching(LMDecodeMethod):
           prefix_decode_state,
           prefix_decode_cache,
           self.decode_state,
-          self.decode_cache,
           slot,
       )
       self.decode_state = new_decode_state
