@@ -1981,16 +1981,16 @@ class ModelServicesRunner:
                 self._postprocess_stream_async(model, batch, streaming_done)
               assert batch.unpadded_shape is None
               assert batch.padded_shape is not None
-              logging.info("Starting JAX trace===================================") 
-              trace_folder = "/tmp/jax-trace/" 
-              jax.profiler.start_trace(trace_folder) 
+              # logging.info("Starting JAX trace===================================") 
+              # trace_folder = "/tmp/jax-trace/" 
+              # jax.profiler.start_trace(trace_folder) 
               result = method_obj.device_compute(
                   input_batch=batch.input_tensors,
                   padded_shape=batch.padded_shape,
               )
-              jax.block_until_ready(result) 
-              jax.profiler.stop_trace() 
-              logging.info("Finished JAX trace at {}=============================".format(trace_folder))
+              # jax.block_until_ready(result) 
+              # jax.profiler.stop_trace() 
+              # logging.info("Finished JAX trace at {}=============================".format(trace_folder))
             if result is None:
               batch.finish()
             else:
