@@ -68,7 +68,6 @@ func MyIPAddr() net.IP {
 	if debugIpaddr == "1" {
 		return net.IPv4(127, 0, 0, 1)
 	}
-
 	myIPAddressMu.Lock()
 	defer myIPAddressMu.Unlock()
 	if myIPAddress == nil {
