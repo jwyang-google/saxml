@@ -473,7 +473,7 @@ class LLaMA70BInt8TPUv5e8(LLaMA70BFP16TPUv5e):
 
   # prefix batch size 1, decode batch size 72.
   BATCH_SIZE = 1
-  NUM_CACHE_SLOTS = 72
+  NUM_CACHE_SLOTS = 64
 
   EXTRA_INPUTS = {
       'temperature': 0.5,
